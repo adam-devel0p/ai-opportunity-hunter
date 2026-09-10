@@ -58,6 +58,19 @@ forwards `ANTHROPIC_API_KEY` into the child process environment.
   your Claude plan" article and re-search for anything newer** — if the split has since gone
   live, this ADR's mechanism still works (it's still CLI + OAuth) but the cost/quota model
   changes and `docs/ARCHITECTURE.md` + the scheduler's backoff assumptions need updating.
+- **Re-verified at the start of Phase 0 (September 2026):** re-fetched the support.claude.com
+  article and re-searched for anything newer than the June 15 pause. Nothing has changed —
+  Agent SDK / `claude -p` usage still draws from the normal Pro/Max/Team subscription pool.
+  Anthropic has not given advance notice of a revised split taking effect. No changes needed
+  to this ADR's mechanism. Separately confirmed empirically in Phase 0: a `claude -p
+  --output-format json` call against this machine's own `claude login` session (no
+  `ANTHROPIC_API_KEY` in the environment) runs successfully and returns a `total_cost_usd`
+  figure in its JSON output — that field is present regardless of billing source (it looks
+  like a list-price-equivalent usage estimate, not proof of which pool it drew from), so it is
+  *not* sufficient on its own to confirm subscription billing. The operator still needs to
+  check claude.ai/console's usage page directly, which is why that remains a manual Phase 0
+  acceptance criterion below rather than something this ADR treats as auto-verified by the
+  CLI's own output.
 
 **Consequences:**
 
@@ -145,3 +158,59 @@ aliases (e.g. `sonnet`, `opus`, `haiku` — whatever aliases `claude -p --model`
 implementation time) read from environment/config, not hardcoded per call site. Spec §52
 requires this explicitly. Confirm current valid `--model` alias values during Phase 0 (they
 drift over time) and record them in `docs/ARCHITECTURE.md`, not in this ADR.
+
+---
+
+## ADR-0007: Tool restriction requires both `--tools` and `--allowedTools`, plus `--permission-prompts none`
+
+**Status:** Accepted, based on empirical testing during the Phase 0 spike.
+
+**Decision:** Every `claudeClient.invokeClaude()` call passes `--tools <exact list>`,
+`--allowedTools <same exact list>`, and `--permission-prompts none`, all three together, never
+just one or two of them. There is no "use the CLI's default tool set" call site anywhere in
+this codebase — every call states its tools explicitly, even calls that need none (`--tools ""`).
+
+**Why:** Before Phase 0, the plan (PLAN.md §9, AGENT_CONTRACTS.md) only mentioned
+`--allowedTools` as the mechanism for restricting tool access per call. Empirical testing
+during the Phase 0 spike found this assumption wrong in two distinct, non-obvious ways:
+
+1. **`--allowedTools` alone does not restrict which tools exist.** It only pre-approves tools
+   against the permission-prompt system; the full default Claude Code tool set (Bash, Edit,
+   Write, Agent, Artifact, etc. — far more than any agent in this system should ever have) is
+   still available underneath it. The flag that actually defines the available tool set is
+   `--tools` (`""` to disable all tools, `"default"` for everything, or an explicit
+   comma-separated list). Confirmed by spawning `claude -p` with only `--allowedTools ""` and
+   asking it to run Bash — it happily executed a real shell command.
+2. **`--tools` alone, without `--allowedTools` naming the same tools, still gets every tool use
+   auto-denied** (correct — no human is present to answer a permission prompt in `-p` mode) —
+   but critically, **on denial the model does not reliably say "I don't have that tool."** In
+   testing, a denied `WebSearch`/`WebFetch` call caused the model to answer from its own
+   training-data recall and present it as if it came from the target's public sources ("from
+   my training data, I can tell you that Anthropic's official website has the main heading
+   'Claude'"). This is exactly the fabrication failure mode spec §24 exists to prevent, and it
+   happens silently unless the tool is both defined (`--tools`) and pre-approved
+   (`--allowedTools`) so the call can actually execute instead of failing closed into a guess.
+
+`--permission-prompts none` is added as defense-in-depth: even with `--tools` and
+`--allowedTools` aligned, anything unexpected (a tool call outside the stated list, e.g. from a
+prompt-injection attempt on a fetched page) is auto-denied rather than hanging forever waiting
+for a permission answer that will never come in a non-interactive worker process.
+
+**Consequences:**
+
+- Every agent's contract (docs/AGENT_CONTRACTS.md) must state its exact tool list, and
+  `claudeClient` has no implicit default — passing an empty `tools: []` is the explicit way to
+  say "no tools," not an oversight.
+- Because denial can still produce a confident-sounding fabricated answer if the *prompt*
+  doesn't also forbid it, the research integrity rules (spec §24) must be stated in the system
+  prompt of every tool-using agent regardless of the `--tools`/`--allowedTools` restriction —
+  the flags stop the tool from firing, but only the prompt stops the model from guessing
+  instead. Neither alone is sufficient; this is documented as a required prompt element in the
+  Phase 5 (Deep Research) and any other web-tool-using agent's prompt template, not something
+  the CLI flags fix by themselves.
+- `--json-schema` (a separate flag, orthogonal to tool restriction) was also confirmed during
+  the spike to constrain the CLI's `result` field to schema-conformant JSON — with no markdown
+  fences or prose commentary — even for tool-using calls. `claudeClient` exposes this as an
+  optional `jsonSchema` field on `ClaudeInvocationOptions`. It is a cheap first line of defense
+  only; the calling agent's Zod schema (per AGENT_CONTRACTS.md) remains the source of truth,
+  since a schema-shaped JSON value can still be semantically wrong.

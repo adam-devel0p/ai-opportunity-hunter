@@ -6,7 +6,7 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 
 | # | Phase | Status | Completion doc |
 |---|-------|--------|----------------|
-| 0 | Foundations & Claude-invocation spike | ⬜ | — |
+| 0 | Foundations & Claude-invocation spike | ✅ | [phase-0-foundations.md](phases/phase-0-foundations.md) |
 | 1 | Data layer & domain model | ⬜ | — |
 | 2 | Work queue & state machine | ⬜ | — |
 | 3 | Discovery Agent + campaigns | ⬜ | — |
@@ -22,9 +22,13 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 0 — Foundations & Claude-invocation spike
-**Next phase:** 1 — Data layer & domain model (blocked on Phase 0 confirming the core
-research-quality and billing-safety assumptions)
+**Current phase:** 1 — Data layer & domain model
+**Next phase:** 2 — Work queue & state machine
+
+Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
+runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
+billing mechanism (ADR-0001 re-verified current; the operator's own claude.ai/console usage
+check is still outstanding — see that phase doc's "Known limitations").
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its
