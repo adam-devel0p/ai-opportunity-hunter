@@ -42,9 +42,12 @@ export const discoveryCampaigns = sqliteTable("discovery_campaigns", {
 });
 
 // --- work_items ----------------------------------------------------------
-// No FK dependencies of its own (entityId is a polymorphic company/opportunity
-// id, not a strict foreign key per DATABASE_SCHEMA.md), so it's safe to
-// declare before the tables that reference it (sources, evidence_items).
+// No FK dependencies of its own (entityId is a polymorphic id, not a strict
+// foreign key per DATABASE_SCHEMA.md), so it's safe to declare before the
+// tables that reference it (sources, evidence_items). Usually a company or
+// opportunity id, per DATABASE_SCHEMA.md — except DISCOVER tasks, which
+// don't have a company yet and instead hold a discovery_campaigns id (see
+// ADR-0010 and src/pipeline/discoverHandler.ts).
 
 export const workItems = sqliteTable("work_items", {
   id: id(),

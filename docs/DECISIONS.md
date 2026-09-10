@@ -323,3 +323,101 @@ turn out to routinely run longer.
 **Consequences:** These are all reasoned starting points, not empirically tuned — flag in a
 later phase's completion doc if real usage suggests any of them are off, same as ADR-0008's
 penalty values.
+
+---
+
+## ADR-0010: Phase 3 (Discovery Agent + campaigns) judgment calls
+
+**Status:** Accepted (Phase 3).
+
+**Decision, part 1 — the validation-retry loop lives in a new `runStructuredAgent.ts`, not
+inside `claudeClient.ts`:** AGENT_CONTRACTS.md's cross-cutting rules say the "one retry with
+the validation error appended, then FAILED" behavior is "implemented once in claudeClient.ts,
+not per-agent." Phase 3 implements the *behavior* that sentence is actually protecting (one
+shared implementation, not one per agent) but in a separate module
+(`src/agents/runStructuredAgent.ts`) layered on top of `claudeClient.invokeClaude`, not inside
+`claudeClient.ts` itself. Reason: `claudeClient.ts` is deliberately Zod-agnostic — it spawns a
+process and returns raw text/JSON, with no knowledge of any specific agent's schema. Validating
+against a `z.ZodType<T>` and re-prompting with the formatted validation error is schema-aware
+logic that belongs one layer up. Every agent (Discovery now; Pre-Screening/Deep
+Research/Opportunity Analysis/... in later phases) calls `runStructuredAgent`, so the "once, not
+per-agent" requirement holds in spirit even though the file boundary differs from the literal
+text.
+
+**Decision, part 2 — campaign selection algorithm (spec §16 diversity):**
+`src/pipeline/campaignSelection.ts` implements smooth weighted round-robin (the algorithm nginx
+uses for weighted load balancing) over `ENABLED` campaigns, weight = `priority + 1` (floored at
+1 so a zero/default-priority campaign is never starved to zero picks). Chosen over "always pick
+highest priority" because that would defeat §16's explicit "don't spend all capacity on one
+sector" requirement — SWRR guarantees every enabled campaign gets picked its proportional share
+within any window of `totalWeight` selections, never letting one campaign dominate every single
+pick even when it has the highest priority. State (`CampaignSelectionState`) is threaded
+explicitly through the pure function rather than held internally, so it can be persisted
+(e.g. a `system_config` row) across separate process invocations once Phase 11's worker loop
+exists; Phase 3 itself doesn't wire that persistence since campaigns are still run one at a time
+via `scripts/discover.ts --campaign <id>`, not autonomously.
+
+**Decision, part 3 — `DISCOVER` work items store a campaign id in `entityId`:**
+DATABASE_SCHEMA.md describes `work_items.entityId` as "company/opportunity id this task operates
+on," and `schema.ts`'s comment (pre-Phase-3) said the same. A `DISCOVER` task doesn't have a
+company yet — it's what creates them — so its only sensible `entityId` is the
+`discovery_campaigns.id` driving it. `entityId`'s polymorphism is extended to include campaign
+ids for this one task type (documented in both this ADR and an updated `schema.ts` comment) 
+rather than adding a separate, mostly-unused column — `entityId` was already untyped/non-FK for
+exactly this kind of polymorphism.
+
+**Decision, part 4 — dedupe: per-campaign hint, global enforcement:** The Discovery Agent's
+"known domains" hint (AGENT_CONTRACTS.md §1) is scoped to companies already discovered *by this
+campaign* (matches the contract's literal wording and keeps the prompt short), but the actual
+insert-time dedupe check in `discoverHandler.ts` is global, keyed on
+`companies.normalizedDomain`'s unique constraint — a business discovered by campaign A and later
+suggested again by campaign B is still not re-inserted, since a company's identity isn't
+campaign-scoped. On a rediscovery hit, the existing row's `lastDiscoveredAt` is bumped and no
+second `PRESCREEN` work item is created; re-triggering the pipeline for an already-processed
+company is spec §60's re-research eligibility window, explicitly Phase 14 scope, not Phase 3's.
+
+**Decision, part 5 — quota exhaustion transitions a `DISCOVER` item to `DEFERRED`, not
+`RETRYABLE`:** Unlike a validation or CLI failure (routed through
+`failureClassification.resolveFailureOutcome`, which increments `attempts` and applies
+backoff), a `quota_exhausted` result doesn't consume a retry attempt — retrying immediately
+can't help, and counting it against `DEFAULT_MAX_ATTEMPTS` would let a single quota exhaustion
+event prematurely exhaust a task's real retry budget. `RUNNING -> DEFERRED` (already a valid
+transition in `stateMachine.ts`, explicitly commented as "quota exhausted mid-task — resume
+later") is used instead, with `runAfter` left null since no scheduler exists yet to interpret
+it — Phase 11's worker loop owns deciding when a quota-deferred item should actually resume.
+
+**Decision, part 6 — Discovery uses the `"fast"` model tier:** Spec §52 explicitly lists
+"discovery" under its lower-cost/faster-model example column. `runDiscoveryAgent` defaults to
+`resolveModelAlias("fast")` (currently `haiku`), overridable per call.
+
+**Decision, part 7 — `reasonToScreen` is stored in `companies.notes`, not a new column:** The
+Discovery Agent's output contract (AGENT_CONTRACTS.md §1) includes `reasonToScreen`, but
+DATABASE_SCHEMA.md's `companies` table has no dedicated field for it. Rather than add a
+single-purpose migration for one Phase-3-only string, it's seeded into the existing
+operator-editable `notes` column (prefixed `"Discovery reason: "`) at insert time. This is a
+deliberate reuse, not silent repurposing — flagged here and in `discoverHandler.ts` — and
+should be revisited if a later phase (e.g. the Phase 12 dashboard) wants to display discovery
+rationale separately from operator notes.
+
+**Decision, part 8 — discovery volume is a code constant + CLI flag, not a `system_config`
+read:** DATABASE_SCHEMA.md lists "discovery volume" among `system_config`'s intended keys, but
+no typed config-accessor module (`src/lib/config.ts`) exists yet — it's referenced in
+DATABASE_SCHEMA.md as a forward pointer for whichever phase first needs it, and building that
+general accessor layer prematurely, for one setting, is out of Phase 3's scope (PLAN.md
+explicitly assigns "a config UI beyond autonomous on/off" to Phase 14).
+`DEFAULT_DISCOVERY_TARGET_COUNT = 8` in `discoveryAgent.ts`, overridable via
+`runDiscoveryAgent`'s `targetCount` or `scripts/discover.ts --count`.
+
+**Decision, part 9 — `prompt_versions` is still not populated:** Phase 3 is the first phase to
+make real Claude calls against the live DB, but no row is written to `prompt_versions` for the
+Discovery Agent's template. Doing so usefully would require a per-call log linking a specific
+invocation's output back to a template version and entity — a facility that doesn't exist yet
+(work_items captures task-level provenance — taskType, entityId, status, attempts, lastError,
+timestamps — but not a link to a prompt-template id). Flagged as an open item, same category as
+Phase 0's original "known limitation" note on this.
+
+**Consequences:** Every later phase's agent (Pre-Screening, Deep Research, Opportunity
+Analysis, Skeptical Verification, Offer Builder, Contact Research, Outreach Writer) should build
+on `runStructuredAgent.ts` rather than reimplementing the retry loop, and should follow the same
+per-task-type judgment-call pattern here (document scope decisions in a new ADR part rather than
+silently deviating) when the source spec doesn't pin something down.

@@ -9,7 +9,7 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 0 | Foundations & Claude-invocation spike | ✅ | [phase-0-foundations.md](phases/phase-0-foundations.md) |
 | 1 | Data layer & domain model | ✅ | [phase-1-data-layer.md](phases/phase-1-data-layer.md) |
 | 2 | Work queue & state machine | ✅ | [phase-2-work-queue.md](phases/phase-2-work-queue.md) |
-| 3 | Discovery Agent + campaigns | ⬜ | — |
+| 3 | Discovery Agent + campaigns | ✅ | [phase-3-discovery-agent.md](phases/phase-3-discovery-agent.md) |
 | 4 | Pre-Screening Agent | ⬜ | — |
 | 5 | Deep Research Agent + evidence model | ⬜ | — |
 | 6 | Opportunity Analysis Agent + scoring | ⬜ | — |
@@ -22,8 +22,8 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 3 — Discovery Agent + campaigns
-**Next phase:** 4 — Pre-Screening Agent
+**Current phase:** 4 — Pre-Screening Agent
+**Next phase:** 5 — Deep Research Agent + evidence model
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -44,6 +44,19 @@ agent handlers yet. See [phase-2-work-queue.md](phases/phase-2-work-queue.md) an
 for the judgment calls made (where `ANALYZE`/`REFRESH_EVIDENCE` fall in the priority order, the
 work-item transition graph, `DISCARDED` vs `EXCLUDED`, failure-classification defaults, and the
 stuck-`RUNNING` timeout).
+
+Phase 3 added the first real agent + live DB wiring: `discovery_campaigns` CRUD
+(`src/lib/campaigns.ts` + `scripts/campaigns.ts`), the Discovery Agent
+(`src/agents/discoveryAgent.ts`) built on a new shared validated-invoke-with-retry layer
+(`src/agents/runStructuredAgent.ts`), diversity-aware campaign selection via smooth weighted
+round-robin (`src/pipeline/campaignSelection.ts`, spec §16), and the `DISCOVER` task handler
+(`src/pipeline/discoverHandler.ts`) that persists deduped companies and enqueues `PRESCREEN`
+work items. Manually verified live against a real campaign — see
+[phase-3-discovery-agent.md](phases/phase-3-discovery-agent.md) and new ADR-0010 for the
+judgment calls made (retry-loop module placement, the SWRR selection algorithm, `DISCOVER`
+work items reusing `entityId` for a campaign id, per-campaign dedupe hinting vs. global dedupe
+enforcement, quota-exhaustion → `DEFERRED` handling, model tier, `reasonToScreen` storage, and
+deferring `system_config`/`prompt_versions` wiring).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

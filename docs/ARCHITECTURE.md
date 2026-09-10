@@ -4,17 +4,19 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 2 (Work queue & state machine) — complete. See
-[phases/phase-2-work-queue.md](phases/phase-2-work-queue.md) for the full writeup.
+**Last updated:** Phase 3 (Discovery Agent + campaigns) — complete. See
+[phases/phase-3-discovery-agent.md](phases/phase-3-discovery-agent.md) for the full writeup.
 
 ## Status
 
-Phases 0-2 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-3 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
-normalization/dedupe, opportunity scoring) from Phase 1, and now the Phase 2 queue/state-machine
-primitives: priority selection, lifecycle transition validation, failure classification, and
-crash recovery. No worker loop, real agent handlers, or dashboard yet — see PLAN.md Phase 3
-onward.
+normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
+primitives (priority selection, lifecycle transition validation, failure classification, crash
+recovery), and now Phase 3's first real agent + live DB wiring: manually-configured discovery
+campaigns, the Discovery Agent, diversity-aware campaign selection, and the `DISCOVER` task
+handler that persists deduped companies and enqueues `PRESCREEN` work. No worker loop, dashboard,
+or any agent past Discovery yet — see PLAN.md Phase 4 onward.
 
 ## Actual stack in use
 
@@ -45,6 +47,17 @@ src/
   agents/
     claudeClient.ts           The only place that spawns the `claude` CLI. See below.
     claudeClient.test.ts      Unit tests: env sanitization, quota detection, invocation shape.
+    runStructuredAgent.ts     Shared validated-invoke-with-retry layer (Phase 3, ADR-0010 part
+                               1) — invokes Claude via claudeClient, parses/validates the result
+                               against a caller-supplied Zod schema, retries once with the
+                               validation error appended to the prompt. Every agent from Phase 3
+                               onward builds on this instead of reimplementing the retry loop.
+    runStructuredAgent.test.ts
+    discoveryAgent.ts          Discovery Agent (AGENT_CONTRACTS.md §1, Phase 3): Zod schema +
+                                hand-mirrored JSON Schema, prompt builder baking in the
+                                never-invent-a-company rule (spec §14), `runDiscoveryAgent`
+                                (fast model tier per spec §52, WebSearch+WebFetch tools).
+    discoveryAgent.test.ts
     schemas/
       deepResearchSpike.ts    Draft Zod + JSON Schema pair for the spike script only —
                                Phase 5 owns the real Deep Research Agent contract.
@@ -66,6 +79,11 @@ src/
                                  penalty catalog (ADR-0008), raw/adjusted score calculation.
                                  Not wired to real opportunities yet (Phase 6 does that).
     scoring.test.ts
+    campaigns.ts                 `discovery_campaigns` CRUD (Phase 3, spec §15): create/list/
+                                  get, and operator status toggles (enable/pause/disable/
+                                  blacklist — freely reversible, no state-machine restriction)
+                                  plus `setCampaignPriority`.
+    campaigns.test.ts
   pipeline/
     stateMachine.ts              Lifecycle transition validators for all three §90-derived
                                   enums (company/opportunity/work-item), each its own table +
@@ -83,9 +101,32 @@ src/
                                   §67) — pure functions; not yet wired to a live DB or called
                                   anywhere (Phase 11's `worker.ts` calls this at startup).
     crashRecovery.test.ts
+    campaignSelection.ts         `selectNextCampaign` (Phase 3, spec §16, ADR-0010 part 2) —
+                                  pure smooth-weighted-round-robin selection over ENABLED
+                                  campaigns, weighted by operator-set priority, state threaded
+                                  explicitly by the caller (not persisted anywhere yet — Phase
+                                  3 runs one campaign at a time via `scripts/discover.ts`).
+    campaignSelection.test.ts
+    discoverHandler.ts           `runDiscoverTask` (Phase 3) — the first live-DB-wired task
+                                  handler: loads the campaign a `DISCOVER` work item targets
+                                  (`entityId` holds a campaign id for this task type, ADR-0010
+                                  part 3), runs the Discovery Agent, inserts new companies
+                                  deduped by normalized domain (global, not per-campaign —
+                                  ADR-0010 part 4), transitions each to `PRESCREEN_PENDING`,
+                                  enqueues a `PRESCREEN` work item per new company, and
+                                  finalizes the `DISCOVER` item (`COMPLETED`, or `DEFERRED` on
+                                  quota exhaustion, or routed through `failureClassification`
+                                  on other failures — ADR-0010 part 5).
+    discoverHandler.test.ts
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
+  campaigns.ts                  Manual campaign CRUD CLI (Phase 3) — create/list/show/enable/
+                                 pause/disable/blacklist/priority. `npm run campaigns -- <cmd>`.
+  discover.ts                   Runs one real DISCOVER work item against the live `claude` CLI
+                                 for a given campaign (Phase 3's manual smoke-test entry point;
+                                 no worker loop exists yet). `npm run discover -- --campaign
+                                 <id> [--count <n>]`.
   db/
     migrate.ts                  `npm run db:migrate` — applies pending migrations to
                                  `AOH_DB_PATH` (default `./data/aoh.db`).
@@ -96,14 +137,18 @@ docs/
   phases/
     phase-0-foundations.md     Phase 0 completion doc.
     phase-1-data-layer.md      Phase 1 completion doc.
+    phase-2-work-queue.md      Phase 2 completion doc.
+    phase-3-discovery-agent.md Phase 3 completion doc.
 ```
 
 Nothing under `src/app` or `src/worker.ts` exists yet — those are Phase 11+ (see PLAN.md's
-target layout for what's still to come). No real agent handlers, work-queue processing against
-a live DB, or UI exist yet — Phase 2's `src/pipeline/` modules are deterministic primitives
-only (pure functions over plain objects/arrays), not wired to `work_items` reads/writes; that
-wiring happens as each later phase's agent handler is built (Phase 3 onward) and finally in
-Phase 11's `worker.ts` loop.
+target layout for what's still to come). No dashboard and no agent past Discovery exist yet.
+Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts` are still
+deterministic primitives only (pure functions over plain objects/arrays), not wired to
+`work_items` reads/writes — that wiring happens incrementally as each later phase's agent
+handler is built (Phase 4 onward) and finally in Phase 11's `worker.ts` loop, which is also
+what will actually run `campaignSelection.ts` autonomously instead of the operator picking a
+campaign by id via `scripts/discover.ts`.
 
 ## `src/agents/claudeClient.ts`
 
@@ -148,9 +193,11 @@ hook (likely wired in whichever phase first does research with persistence — P
   3). JSON-shaped columns (`criteria`, `impactAssumptions`, `dependencies`, `risks`,
   `penalties`, the four `verifier*` arrays, `keyAssumptions`, `system_config.value`) use
   Drizzle's `{ mode: "json" }` text columns with a `$type<T>()` annotation.
-- `client.ts` — `createDb(path)` opens `better-sqlite3` with `journal_mode = WAL` and
-  `foreign_keys = ON` (SQLite defaults foreign keys OFF per-connection; without this pragma the
-  FK references in the schema would be silently unenforced), wraps it in `drizzle()`.
+- `client.ts` — `createDb(path)` creates the DB file's parent directory if missing (Phase 3
+  fix — a fresh checkout's gitignored `./data/` doesn't exist until something creates it),
+  opens `better-sqlite3` with `journal_mode = WAL` and `foreign_keys = ON` (SQLite defaults
+  foreign keys OFF per-connection; without this pragma the FK references in the schema would
+  be silently unenforced), wraps it in `drizzle()`.
 - `migrate.ts` — `runMigrations(path)` applies everything in `drizzle/` via
   `drizzle-orm/better-sqlite3/migrator`. Both `scripts/db/migrate.ts` (real DB, path from
   `AOH_DB_PATH`, default `./data/aoh.db`) and `schema.test.ts` (a fresh temp-dir DB per test)
@@ -260,26 +307,39 @@ full reasoning:
 
 ## Known limitations
 
-- No retry-with-validation-error loop in `claudeClient` yet — the real
-  `docs/AGENT_CONTRACTS.md` contract (one retry, error appended, then `FAILED`) needs the work
-  queue (Phase 2) to exist so there's somewhere to record the `FAILED` status. The DB now exists
-  (Phase 1) but nothing writes `work_items`/`prompt_versions` rows from `claudeClient` yet.
 - No Source-row provenance hook (ADR-0004) yet — the `sources` table exists but nothing
-  populates it outside of the Phase 1 round-trip test; that's Phase 5.
+  populates it outside of the Phase 1 round-trip test; that's Phase 5. Discovery doesn't need
+  it (it doesn't produce evidence_items), so this wasn't pulled forward into Phase 3.
 - `scripts/spike-research.ts` is intentionally throwaway: no persistence, no retry, draft
   schema only. Do not import it from real agent code in later phases — Phase 5 builds the real
   Deep Research Agent from scratch against the finalized contract.
-- `src/pipeline/` (Phase 2) builds the transition/priority/failure/crash-recovery primitives but
-  wires none of them to a live DB or to `claudeClient` — no code path yet actually reads or
-  writes a real `work_items` row through these functions. That wiring is incremental: each of
-  Phase 3-10's agent handlers enqueues/consumes real work items using these primitives, and
-  Phase 11's `worker.ts` is what runs `crashRecovery` at startup and drives the main loop.
+- `src/pipeline/stateMachine.ts`, `priority.ts`, `failureClassification.ts`, and
+  `crashRecovery.ts` are still pure primitives with no live-DB wiring of their own — Phase 3's
+  `discoverHandler.ts` is the first module to actually call them against real `work_items`/
+  `companies` rows (for the `DISCOVER` task type only). Phase 4 onward wires the rest
+  incrementally; Phase 11's `worker.ts` is what runs `crashRecovery` at startup and drives the
+  main loop instead of the operator invoking `scripts/discover.ts` by hand.
 - `src/pipeline/failureClassification.ts`'s pattern lists (transient vs. permanent error text)
-  are a reasoned starting point, not exhaustive — expect to extend them once Phase 3+ produce
-  real failure messages from live web research/Claude calls, the same caveat
-  `claudeClient.ts`'s `detectQuotaExhaustion` patterns already carry.
-- `updatedAt` columns are set at insert time only; nothing yet re-sets them on update, since no
-  update code paths exist before Phase 2+. Any phase adding an update path must set it
-  explicitly (see DATABASE_SCHEMA.md's "Conventions").
+  are a reasoned starting point, not exhaustive — Phase 3's live discovery runs didn't exercise
+  the failure path (both real runs succeeded), so these patterns are still unvalidated against
+  real Discovery Agent failure text; expect to extend them once Phase 4+ produce real failures.
+- `updatedAt` columns are set at insert time only in most tables; Phase 3's `discoverHandler.ts`
+  is the first code path to actually update rows post-insert (`companies.lifecycleStatus`/
+  `lastDiscoveredAt`, `work_items.status`), and it does set `updatedAt` explicitly on every
+  update, per DATABASE_SCHEMA.md's "Conventions." Later phases adding new update paths must do
+  the same.
 - Opportunity scoring (`src/lib/scoring.ts`) is correct and tested in isolation but not wired to
   any real `opportunity_evaluations` row yet — Phase 6 does that.
+- No worker loop or scheduler exists yet (Phase 11), so `campaignSelection.ts`'s
+  weighted-round-robin selection state is never actually persisted anywhere — Phase 3 only
+  proves the pure selection function works; an operator runs discovery one campaign at a time
+  via `scripts/discover.ts --campaign <id>`, choosing the campaign themselves rather than
+  going through `selectNextCampaign`.
+- `system_config` (discovery volume, etc.) and `prompt_versions` are still not written to by
+  any code path — Phase 3 kept discovery volume as a code constant/CLI flag instead of building
+  a general config-accessor layer for one setting (ADR-0010 part 8), and prompt-template
+  versioning has no per-call log to link against yet (ADR-0010 part 9).
+- `companies.notes` is now used for two purposes: genuine operator notes, and (as of Phase 3)
+  a seeded `"Discovery reason: ..."` string from the Discovery Agent's `reasonToScreen` output,
+  since there's no dedicated schema column for it (ADR-0010 part 7). Revisit if a later phase
+  (e.g. the Phase 12 dashboard) needs to distinguish the two.

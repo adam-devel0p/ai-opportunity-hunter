@@ -13,7 +13,9 @@
     "test": "vitest run",
     "spike:research": "tsx scripts/spike-research.ts",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx scripts/db/migrate.ts"
+    "db:migrate": "tsx scripts/db/migrate.ts",
+    "campaigns": "tsx scripts/campaigns.ts",
+    "discover": "tsx scripts/discover.ts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
