@@ -1,12 +1,17 @@
-# Database schema (initial design, implemented in Phase 1)
+# Database schema (implemented in Phase 1)
 
-SQLite, Drizzle ORM. This is the proposed shape derived from spec §55-58; Phase 1 implements
-it as `src/db/schema.ts` and this doc should be updated to match reality afterward (keep it
-in sync — it's the fast-reference version of the schema, the `.ts` file is the source of
-truth).
+SQLite, Drizzle ORM. Implemented as `src/db/schema.ts`, migrated with `drizzle-kit` into
+`drizzle/*.sql` (committed — these are the real migration history, not build output). This doc
+is the fast-reference version; the `.ts` file is the source of truth if they ever disagree.
 
-Conventions: every table has `id` (text, cuid/uuid), `createdAt`, `updatedAt`. Enums are
-implemented as TS string-literal unions + a `CHECK` constraint or Drizzle enum, not free text.
+Conventions: every table has `id` (text, `crypto.randomUUID()` — no extra cuid dependency
+needed for a single-process local app), `createdAt`/`updatedAt` (unix-ms timestamps, set at
+insert time; nothing yet auto-bumps `updatedAt` on update — callers pass it explicitly, since
+no update code exists before Phase 2+). Enums are implemented as Drizzle's `text(col, {
+enum: [...] })`, which gives a TS string-literal union on every read/write; this was judged
+sufficient on its own (DB-level `CHECK` constraints were considered and skipped as redundant
+belt-and-suspenders for a single-writer local app where the TS layer is the only writer).
+The DB is opened with `journal_mode = WAL` and `foreign_keys = ON` (`src/db/client.ts`).
 
 ## `companies`
 
@@ -31,7 +36,7 @@ Identity + lifecycle for a discovered business (spec §14, §56).
 | lastResearchedAt | timestamp | nullable |
 | nextEligibleResearchAt | timestamp | nullable — re-research window, spec §60 |
 | sourceCampaignId | text fk → discovery_campaigns.id | |
-| lifecycleStatus | enum | spec §90 state list |
+| lifecycleStatus | enum | `DISCOVERED \| PRESCREEN_PENDING \| PRESCREENED \| RESEARCH_PENDING \| RESEARCHED \| NO_OPPORTUNITY \| DISCARDED \| EXCLUDED` — the company-level portion of spec §90's flow only. See "Splitting spec §90 across tables" below. |
 | exclusionReason | text | nullable |
 | doNotContact | boolean | default false — spec §65 |
 | notes | text | nullable, operator-editable |
@@ -113,18 +118,37 @@ Spec §26, §58.
 | recurringRevenuePossibility | text | nullable |
 | demoConcept | text | nullable |
 | confidence | real | |
-| status | enum | spec §90 lifecycle |
+| status | enum | `OPPORTUNITY_IDENTIFIED \| VERIFICATION_PENDING \| VERIFIER_REJECTED \| VERIFIED \| OFFER_READY \| CONTACT_RESEARCH \| OUTREACH_READY \| SENT` — the opportunity-level portion of spec §90's flow. Terminates at `SENT`; see below. |
 | operatorFeedback | text | nullable |
-| rejectionReason | enum | nullable, spec §46 list |
+| rejectionReason | enum | nullable — `WEAK_EVIDENCE \| BAD_PROBLEM \| WOULDNT_BUY \| TOO_DIFFICULT \| TOO_SMALL \| TOO_LARGE \| ALREADY_SOLVED \| POOR_CONTACT \| BAD_PRICE \| REGULATORY_RISK \| GENERIC_IDEA \| NOT_INTERESTING \| OTHER` (spec §46, verbatim) |
 
 Facts/inferences/hypotheses/unknowns for an opportunity are **not** duplicated columns — they
 are the `evidence_items` rows linked via `opportunityId`, filtered by `classification`. One
 source of truth, per spec §21's "never silently convert" rule (there's nowhere else for the
 classification to drift out of sync).
 
+**Splitting spec §90 across tables:** the spec's single conceptual state chain (DISCOVERED →
+... → WON/LOST) spans three different entities with different lifetimes — a company can exist
+with no opportunity yet, and after an opportunity is sent, its ongoing reply/interest/meeting
+history is really a sequence of *events*, not a single current state. Rather than one giant
+enum duplicated (and liable to drift) across tables, the chain is split at natural ownership
+boundaries: `companies.lifecycleStatus` owns discovery-through-research, `opportunities.status`
+owns formation-through-send, and everything after a draft is sent
+(`SENT \| REPLIED \| NO_REPLY \| INTERESTED \| NOT_INTERESTED \| MEETING \| WON \| LOST`) is
+recorded as `outreach_outcomes.event` rows — an append-only event log, not a current-status
+column, since the spec explicitly wants outcome *history* preserved for the Phase 13 feedback
+loop (§47), not just a latest value. Spec §90 itself says "exact implementation statuses may
+differ," which is the license this split relies on.
+
 ## `opportunity_evaluations`
 
-Scoring + verification, spec §26/§30/§31/§33.
+Scoring + verification, spec §26/§30/§31/§33. Component ranges, `rawScore`, and
+`adjustedScore` are produced by `src/lib/scoring.ts` — pure functions, never a Claude-supplied
+number (§30's "scoring components must remain visible" requirement, and PLAN.md §11's rule
+that arithmetic is always deterministic code). Penalty reasons/amounts are the
+`PENALTY_CATALOG` in that same module (10 named reasons from spec §31, whose exact point
+values weren't specified by the source spec — "may be determined in implementation
+planning" — so they were chosen in Phase 1 and recorded in ADR-0008).
 
 | column | type | notes |
 |---|---|---|

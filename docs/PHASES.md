@@ -7,7 +7,7 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | # | Phase | Status | Completion doc |
 |---|-------|--------|----------------|
 | 0 | Foundations & Claude-invocation spike | ✅ | [phase-0-foundations.md](phases/phase-0-foundations.md) |
-| 1 | Data layer & domain model | ⬜ | — |
+| 1 | Data layer & domain model | ✅ | [phase-1-data-layer.md](phases/phase-1-data-layer.md) |
 | 2 | Work queue & state machine | ⬜ | — |
 | 3 | Discovery Agent + campaigns | ⬜ | — |
 | 4 | Pre-Screening Agent | ⬜ | — |
@@ -22,13 +22,19 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 1 — Data layer & domain model
-**Next phase:** 2 — Work queue & state machine
+**Current phase:** 2 — Work queue & state machine
+**Next phase:** 3 — Discovery Agent + campaigns
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
 billing mechanism (ADR-0001 re-verified current; the operator's own claude.ai/console usage
 check is still outstanding — see that phase doc's "Known limitations").
+
+Phase 1 added the full SQLite schema (Drizzle, 13 tables) and the deterministic domain logic
+that doesn't need Claude: domain normalization/dedupe and opportunity scoring, both pure
+functions with unit tests. See [phase-1-data-layer.md](phases/phase-1-data-layer.md) and new
+ADR-0008 for the non-obvious calls made (penalty point values, splitting spec §90's state chain
+across three tables).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

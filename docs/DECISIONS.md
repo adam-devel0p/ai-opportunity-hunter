@@ -214,3 +214,51 @@ for a permission answer that will never come in a non-interactive worker process
   optional `jsonSchema` field on `ClaudeInvocationOptions`. It is a cheap first line of defense
   only; the calling agent's Zod schema (per AGENT_CONTRACTS.md) remains the source of truth,
   since a schema-shaped JSON value can still be semantically wrong.
+
+---
+
+## ADR-0008: Opportunity penalty point values, and splitting spec §90's status chain across three tables
+
+**Status:** Accepted (Phase 1).
+
+**Decision, part 1 — penalty amounts:** Spec §31 lists ten penalty *reasons* but explicitly
+leaves exact point values to implementation. `src/lib/scoring.ts`'s `PENALTY_CATALOG` assigns:
+
+| Reason | Points | Why this weight |
+|---|---|---|
+| `PROBLEM_ALREADY_SOLVED` | 20 | Undermines the opportunity's entire premise — the biggest single penalty. |
+| `WEAK_SPECULATIVE_EVIDENCE`, `SIGNIFICANT_REGULATORY_RISK`, `COMPANY_FINANCIALLY_UNSUITABLE` | 15 | Each independently threatens whether the deal can close at all. |
+| `COMMODITY_SOLUTION_AVAILABLE`, `LARGE_PROCUREMENT_BURDEN`, `UNCLEAR_BUYER`, `IMPLEMENTATION_DEPENDENCY_OUTSIDE_CONTROL`, `CROWDED_GENERIC_OFFER` | 10 | Meaningfully reduce attractiveness without necessarily killing the opportunity outright. |
+| `LONG_IMPLEMENTATION_CYCLE` | 5 | A soft timing/effort concern, not a reason to reject on its own. |
+
+Chosen so that a single severe penalty (e.g. "problem already solved") can plausibly drag a
+strong-looking opportunity below the Phase 7 gating threshold (~75/100) on its own, while a
+single mild penalty (long cycle) does not. Revisit once Phase 7 gating is live against real
+data — these are a reasoned starting point, not empirically tuned.
+
+**Decision, part 2 — splitting the §90 chain:** Spec §90 draws one conceptual state chain from
+`DISCOVERED` through `WON/LOST`, but says explicitly that "exact implementation statuses may
+differ." `companies`, `opportunities`, and `outreach_outcomes` have different lifetimes and
+cardinalities (a company may never form an opportunity; an opportunity may be sent once but
+accrue many outcome events afterward), so the chain is split at those boundaries rather than
+stored as one column duplicated across tables:
+- `companies.lifecycleStatus`: `DISCOVERED` → `RESEARCHED` (or `NO_OPPORTUNITY`/`DISCARDED`/`EXCLUDED`).
+- `opportunities.status`: `OPPORTUNITY_IDENTIFIED` → `SENT`.
+- `outreach_outcomes.event`: an append-only log (`SENT \| REPLIED \| NO_REPLY \| INTERESTED \|
+  NOT_INTERESTED \| MEETING \| WON \| LOST`), not a status column — Phase 13's feedback loop
+  (§47) needs the full history, not just the latest event, so a mutable "current status" field
+  would be the wrong shape even before considering drift risk.
+
+**Decision, part 3 — enums as `text(..., { enum: [...] })`, no DB-level `CHECK`:** Considered
+adding explicit SQL `CHECK` constraints (drizzle-orm's `check()` helper) on every enum column
+for defense-in-depth. Skipped: this is a single-writer local app where `src/db/schema.ts`'s TS
+types are the only thing that ever writes to the DB (no external tool, no multi-service
+writers), so a `CHECK` constraint would duplicate what the type system already guarantees at
+every call site, with no realistic path for a stray raw value to reach the DB. Revisit only if
+a later phase adds a write path that bypasses Drizzle's typed API (none currently planned).
+
+**Consequences:** Phase 6 (Opportunity Analysis) and Phase 7 (Skeptical Verification) should
+treat `PENALTY_CATALOG`'s values as adjustable, not fixed — flag in that phase's completion doc
+if real opportunities suggest the weights are off. Phase 2's state machine
+(`src/pipeline/stateMachine.ts`) must implement transitions for all three enums as separate,
+independently-validated chains, not one shared transition function.
