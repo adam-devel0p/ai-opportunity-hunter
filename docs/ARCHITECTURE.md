@@ -4,15 +4,17 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 1 (Data layer & domain model) — complete. See
-[phases/phase-1-data-layer.md](phases/phase-1-data-layer.md) for the full writeup.
+**Last updated:** Phase 2 (Work queue & state machine) — complete. See
+[phases/phase-2-work-queue.md](phases/phase-2-work-queue.md) for the full writeup.
 
 ## Status
 
-Phases 0-1 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
-client, and now a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
-normalization/dedupe, opportunity scoring) that doesn't need Claude at all. No work queue,
-worker loop, dashboard, or real agents yet — see PLAN.md Phase 2 onward.
+Phases 0-2 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
+normalization/dedupe, opportunity scoring) from Phase 1, and now the Phase 2 queue/state-machine
+primitives: priority selection, lifecycle transition validation, failure classification, and
+crash recovery. No worker loop, real agent handlers, or dashboard yet — see PLAN.md Phase 3
+onward.
 
 ## Actual stack in use
 
@@ -64,6 +66,23 @@ src/
                                  penalty catalog (ADR-0008), raw/adjusted score calculation.
                                  Not wired to real opportunities yet (Phase 6 does that).
     scoring.test.ts
+  pipeline/
+    stateMachine.ts              Lifecycle transition validators for all three §90-derived
+                                  enums (company/opportunity/work-item), each its own table +
+                                  function. Throws `InvalidTransitionError` on an invalid move.
+    stateMachine.test.ts
+    priority.ts                  `TASK_TYPE_PRIORITY` (spec §49 ordering, ADR-0009 part 1) and
+                                  `selectNextWorkItem` — pure selection over queue contents.
+    priority.test.ts
+    failureClassification.ts     `classifyFailure` (spec §66, ADR-0009 part 4),
+                                  `computeRetryBackoffMs` (1m exponential, capped 1h), and
+                                  `resolveFailureOutcome` tying both to a state-machine-validated
+                                  work-item update.
+    failureClassification.test.ts
+    crashRecovery.ts             `findStuckRunningItems` / `planStuckWorkItemRecovery` (spec
+                                  §67) — pure functions; not yet wired to a live DB or called
+                                  anywhere (Phase 11's `worker.ts` calls this at startup).
+    crashRecovery.test.ts
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
@@ -79,10 +98,12 @@ docs/
     phase-1-data-layer.md      Phase 1 completion doc.
 ```
 
-Nothing under `src/pipeline`, `src/app`, or `src/worker.ts` exists yet — those are Phase 2+
-(see PLAN.md's target layout for what's still to come). No agent orchestration, work-queue
-processing, or UI was added in Phase 1 — `work_items` exists as a table only; nothing reads or
-writes it yet outside of the Phase 1 round-trip test.
+Nothing under `src/app` or `src/worker.ts` exists yet — those are Phase 11+ (see PLAN.md's
+target layout for what's still to come). No real agent handlers, work-queue processing against
+a live DB, or UI exist yet — Phase 2's `src/pipeline/` modules are deterministic primitives
+only (pure functions over plain objects/arrays), not wired to `work_items` reads/writes; that
+wiring happens as each later phase's agent handler is built (Phase 3 onward) and finally in
+Phase 11's `worker.ts` loop.
 
 ## `src/agents/claudeClient.ts`
 
@@ -159,6 +180,43 @@ hook (likely wired in whichever phase first does research with persistence — P
   all three together. Not wired to real `opportunity_evaluations` rows yet — Phase 6 does that;
   Phase 1 only guarantees the arithmetic itself is correct and tested.
 
+## `src/pipeline/` (Phase 2)
+
+All four modules are pure/deterministic — no Claude call, no live DB access. They're the
+primitives PLAN.md Phase 3+ agent handlers and Phase 11's `worker.ts` build on, not
+orchestration themselves.
+
+- `stateMachine.ts` — per ADR-0008 part 2, the spec §90 chain is split across three
+  independently-owned enums, so there are three separate transition tables + validator
+  functions here, not one shared one: `transitionCompanyLifecycle`,
+  `transitionOpportunityStatus`, `transitionWorkItemStatus`. Each throws
+  `InvalidTransitionError` (carrying `chain`/`from`/`to`) rather than silently accepting an
+  invalid move. `EXCLUDED` is handled as a cross-cutting special case in
+  `transitionCompanyLifecycle` (reachable from any other company status, since spec §61
+  exclusion is an operator action, not a pipeline stage) rather than repeated in every row of
+  `COMPANY_LIFECYCLE_TRANSITIONS` — see ADR-0009 part 3.
+- `priority.ts` — `TASK_TYPE_PRIORITY` (spec §49's ordering, plus `ANALYZE`/`REFRESH_EVIDENCE`
+  placed per ADR-0009 part 1) and `selectNextWorkItem(items, now)`: filters to
+  `PENDING`/`RETRYABLE`/`DEFERRED` items whose `runAfter` has passed (`isEligibleNow`), then
+  picks the highest-priority one, breaking ties by `createdAt` ascending (oldest first). Generic
+  over any object shape satisfying `QueueableWorkItem`, so it works against plain fixtures now
+  and real Drizzle rows later without change.
+- `failureClassification.ts` — `classifyFailure({errorMessage, attempts, maxAttempts})` (spec
+  §66): defaults to `RETRYABLE` (most listed failure causes are transient), pattern-matches a
+  short list of genuinely permanent causes (401/403/404, "invalid state transition") to
+  `NON_RETRYABLE`, and treats an item that has exhausted `maxAttempts` (default 3) as
+  `NON_RETRYABLE` regardless of cause. `computeRetryBackoffMs(attempts)` is exponential from 1
+  minute, capped at 1 hour — deliberately a different, shorter schedule than Phase 11's
+  quota-exhaustion backoff (PLAN.md §12), see ADR-0009 part 4. `resolveFailureOutcome` combines
+  both into a `{status, runAfter}` work-item update, routed through
+  `stateMachine.transitionWorkItemStatus` so an invalid outcome can't be produced silently.
+- `crashRecovery.ts` — spec §67: `findStuckRunningItems(items, now, timeoutMs)` is a pure
+  filter (`RUNNING` + `startedAt` older than `DEFAULT_STUCK_RUNNING_TIMEOUT_MS` = 30 min, see
+  ADR-0009 part 5; a `RUNNING` item with no `startedAt` is left alone rather than guessed at).
+  `planStuckWorkItemRecovery` maps those to `{id, nextStatus: "RETRYABLE"}` via the validated
+  state-machine transition. Not wired to a live DB or called by anything yet — Phase 11's
+  `worker.ts` is what will actually run this once at startup against real `work_items` rows.
+
 ## `src/config/models.ts`
 
 `resolveModelAlias(tier: "fast" | "reasoning", env?)` reads `AOH_MODEL_FAST` /
@@ -211,9 +269,15 @@ full reasoning:
 - `scripts/spike-research.ts` is intentionally throwaway: no persistence, no retry, draft
   schema only. Do not import it from real agent code in later phases — Phase 5 builds the real
   Deep Research Agent from scratch against the finalized contract.
-- No work-queue processing, lifecycle transition functions, or crash recovery yet — `work_items`
-  and every lifecycle-status enum exist as columns only; `src/pipeline/stateMachine.ts` (Phase 2)
-  is what will actually enforce valid transitions and reset stuck `RUNNING` items.
+- `src/pipeline/` (Phase 2) builds the transition/priority/failure/crash-recovery primitives but
+  wires none of them to a live DB or to `claudeClient` — no code path yet actually reads or
+  writes a real `work_items` row through these functions. That wiring is incremental: each of
+  Phase 3-10's agent handlers enqueues/consumes real work items using these primitives, and
+  Phase 11's `worker.ts` is what runs `crashRecovery` at startup and drives the main loop.
+- `src/pipeline/failureClassification.ts`'s pattern lists (transient vs. permanent error text)
+  are a reasoned starting point, not exhaustive — expect to extend them once Phase 3+ produce
+  real failure messages from live web research/Claude calls, the same caveat
+  `claudeClient.ts`'s `detectQuotaExhaustion` patterns already carry.
 - `updatedAt` columns are set at insert time only; nothing yet re-sets them on update, since no
   update code paths exist before Phase 2+. Any phase adding an update path must set it
   explicitly (see DATABASE_SCHEMA.md's "Conventions").

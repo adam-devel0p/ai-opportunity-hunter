@@ -262,3 +262,64 @@ treat `PENALTY_CATALOG`'s values as adjustable, not fixed — flag in that phase
 if real opportunities suggest the weights are off. Phase 2's state machine
 (`src/pipeline/stateMachine.ts`) must implement transitions for all three enums as separate,
 independently-validated chains, not one shared transition function.
+
+---
+
+## ADR-0009: Phase 2 queue/state-machine judgment calls not pinned down by the source spec
+
+**Status:** Accepted (Phase 2).
+
+**Decision, part 1 — priority weights for `ANALYZE` and `REFRESH_EVIDENCE`:** Spec §49 gives an
+explicit 7-item priority ordering but the `work_items.taskType` enum has two members it never
+mentions. `src/pipeline/priority.ts`'s `TASK_TYPE_PRIORITY` places them as:
+
+- `ANALYZE` between `WRITE_OUTREACH` and `RESEARCH` — it turns already-gathered research into a
+  scored opportunity, so (like verify/offer/contact/outreach) it progresses work with sunk
+  research investment rather than starting fresh, but it hasn't cleared verification yet.
+- `REFRESH_EVIDENCE` between `RESEARCH` and `PRESCREEN` — keeping existing evidence current
+  (spec §60) is worth doing but should never crowd out researching a promising company for the
+  first time.
+
+Chosen so a full priority-ordering test can assert the whole 9-item sequence, not just the
+7 spec explicitly names. Revisit once Phase 6+ show whether refreshing evidence for an
+active opportunity should actually outrank fresh `RESEARCH` on a new company.
+
+**Decision, part 2 — work item transition graph:** `RETRYABLE` and `DEFERRED` both transition
+straight back to `RUNNING` (not through `PENDING`) since nothing meaningful happens in
+`PENDING` that isn't already captured by the item's stored `priority`/`runAfter`. Both, plus
+`PENDING`, can transition to `CANCELLED` (operator/exclusion cancels queued-but-not-yet-running
+work); `RUNNING` cannot go directly to `CANCELLED` — a genuinely stuck `RUNNING` item is first
+recovered to `RETRYABLE` by crash recovery (spec §67), which can then be cancelled, rather than
+inventing a second, overlapping "cancel while running" path.
+
+**Decision, part 3 — company lifecycle `DISCARDED` vs `EXCLUDED`:** `DISCARDED` is reachable
+only from the normal discovery→research pipeline stages (`DISCOVERED` through
+`RESEARCH_PENDING`) — it represents a pipeline-stage judgment (dead site, already covered
+recently, etc., per PLAN.md Phase 4). `EXCLUDED` is handled as a special case reachable from any
+other non-`EXCLUDED` status, since spec §61's blacklist/exclusion system is an operator action
+that can happen at any point in a company's life, not a pipeline outcome — encoding it as a
+special case avoids repeating it in every row of `COMPANY_LIFECYCLE_TRANSITIONS` (and the drift
+risk that repetition would carry) while keeping the table itself an accurate picture of the
+actual pipeline shape.
+
+**Decision, part 4 — failure classification defaults and backoff schedule:** Spec §66 lists
+failure causes without saying which are retryable; nearly all of them (usage limits, DNS,
+network, rate limiting, page/source issues, DB lock, timeouts) are transient, so
+`src/pipeline/failureClassification.ts`'s `classifyFailure` defaults unrecognized errors to
+`RETRYABLE` and only pattern-matches a short explicit list (`401`/`403`/`404`, "invalid state
+transition") as `NON_RETRYABLE`, plus treats an item that has exhausted `DEFAULT_MAX_ATTEMPTS`
+(3, matching AGENT_CONTRACTS.md's "one retry, then FAILED" framing generalized to non-Claude
+failures) as `NON_RETRYABLE` regardless of cause. Retry backoff is exponential starting at 1
+minute, doubling, capped at 1 hour (`computeRetryBackoffMs`) — a separate, shorter schedule than
+PLAN.md §12's quota-exhaustion backoff (30 min+, Phase 11), since a single task retry and a
+quota-exhausted scheduler-wide pause are different situations with different acceptable delays.
+
+**Decision, part 5 — stuck-`RUNNING` timeout:** `DEFAULT_STUCK_RUNNING_TIMEOUT_MS` = 30 minutes.
+No single agent call in this system is expected to run anywhere near that long; picked
+generously so crash recovery never recovers a task that's merely slow rather than actually
+abandoned. Revisit if a later phase's real agent calls (e.g. Deep Research with many web fetches)
+turn out to routinely run longer.
+
+**Consequences:** These are all reasoned starting points, not empirically tuned — flag in a
+later phase's completion doc if real usage suggests any of them are off, same as ADR-0008's
+penalty values.
