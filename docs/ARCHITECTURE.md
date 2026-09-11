@@ -4,24 +4,26 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 5 (Deep Research Agent + evidence model) — complete. See
-[phases/phase-5-deep-research-agent.md](phases/phase-5-deep-research-agent.md) for the full
-writeup.
+**Last updated:** Phase 6 (Opportunity Analysis Agent + scoring wiring) — complete. See
+[phases/phase-6-opportunity-analysis-agent.md](phases/phase-6-opportunity-analysis-agent.md) for
+the full writeup.
 
 ## Status
 
-Phases 0-5 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-6 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
 normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
 primitives (priority selection, lifecycle transition validation, failure classification, crash
 recovery), Phase 3's first real agent + live DB wiring (manually-configured discovery campaigns,
 the Discovery Agent, diversity-aware campaign selection, the `DISCOVER` task handler), Phase 4's
-second real agent (the Pre-Screening Agent + the `PRESCREEN` task handler), and now Phase 5's
-third real agent: the Deep Research Agent + the `RESEARCH` task handler, which persists
-provenance-verified evidence and enqueues `ANALYZE` work, plus the ADR-0004 `PostToolUse`
-evidence-provenance hook (the first phase to need it — every `WebFetch` call is independently
-recorded as a `sources` row). No worker loop, dashboard, or any agent past Deep Research yet —
-see PLAN.md Phase 6 onward.
+second real agent (the Pre-Screening Agent + the `PRESCREEN` task handler), Phase 5's third real
+agent (the Deep Research Agent + the `RESEARCH` task handler, which persists provenance-verified
+evidence and enqueues `ANALYZE` work, plus the ADR-0004 `PostToolUse` evidence-provenance hook),
+and now Phase 6's fourth real agent: the Opportunity Analysis Agent + the `ANALYZE` task handler,
+which turns a company's evidence into a scored `opportunities`/`opportunity_evaluations` row —
+the first phase to wire `src/lib/scoring.ts` (built in Phase 1) to real data, and to enqueue
+`VERIFY` work. No worker loop or dashboard yet, and no agent past Opportunity Analysis — see
+PLAN.md Phase 7 onward.
 
 ## Actual stack in use
 
@@ -81,6 +83,15 @@ src/
                                 `extractWebFetchEvent` (parses a PostToolUse payload — used by
                                 both this module's settings builder and the hook script itself).
     sourceCaptureHook.test.ts
+    opportunityAnalysisAgent.ts  Opportunity Analysis Agent (AGENT_CONTRACTS.md §4, Phase 6):
+                                  Zod schema (including `scoreComponents`/`penaltyReasons`,
+                                  derived programmatically from `src/lib/scoring.ts`'s ranges/
+                                  catalog so the two can't drift, ADR-0013 part 1) + hand-mirrored
+                                  JSON Schema, prompt builder (bakes in spec §27-29's
+                                  deliverability/value/ROI guidance and the §88/§89
+                                  honest-evidence integrity rules verbatim), `runOpportunityAnalysisAgent`
+                                  (reasoning model tier, no tools — ADR-0013 part 4).
+    opportunityAnalysisAgent.test.ts
     schemas/
       deepResearchSpike.ts    Draft Zod + JSON Schema pair for the spike script only —
                                superseded by deepResearchAgent.ts's real contract; kept only
@@ -100,9 +111,14 @@ src/
     normalize.ts                `normalizeDomain(website)` — spec §17 dedupe key.
     normalize.test.ts
     scoring.ts                  Pure opportunity scoring (spec §30-31) — component ranges,
-                                 penalty catalog (ADR-0008), raw/adjusted score calculation.
-                                 Not wired to real opportunities yet (Phase 6 does that).
+                                 penalty catalog (ADR-0008), raw/adjusted score calculation. Wired
+                                 to real `opportunity_evaluations` rows since Phase 6
+                                 (`src/pipeline/analyzeHandler.ts`).
     scoring.test.ts
+    problemCategories.ts        `PROBLEM_CATEGORY_SEED_LIST` (spec §25, Phase 6) — inspiration-only
+                                 category list fed into the Opportunity Analysis Agent's prompt;
+                                 `opportunities.problemCategory` is free text, never constrained
+                                 to this list.
     sourceFreshness.ts          `computeSourceFreshnessState` (spec §23, Phase 5) — deterministic
                                  `sources.freshnessState` derivation: `UNAVAILABLE` for a
                                  non-2xx/missing HTTP status, else `FRESH`/`STALE` by a
@@ -183,6 +199,28 @@ src/
                                   failures handled the same way as `discoverHandler.ts`/
                                   `prescreenHandler.ts`.
     researchHandler.test.ts
+    analyzeHandler.ts             `runAnalyzeTask` (Phase 6) — the fourth live-DB-wired task
+                                  handler: loads the company an `ANALYZE` work item targets
+                                  (`entityId` is a company id, same convention as `PRESCREEN`/
+                                  `RESEARCH`), loads all its `evidence_items` (joined against
+                                  `sources` for URL context), runs the Opportunity Analysis
+                                  Agent, and turns the result into one `opportunities` row plus
+                                  one `opportunity_evaluations` row — the raw/adjusted score is
+                                  always computed by `src/lib/scoring.ts` from the agent's
+                                  `scoreComponents`/`penaltyReasons`, never taken from the agent
+                                  directly (ADR-0013 part 1). Every `ANALYZE` task that reaches a
+                                  successful Claude call forms exactly one opportunity regardless
+                                  of score (ADR-0013 part 2); the opportunity is persisted
+                                  straight at `VERIFICATION_PENDING` in one write (ADR-0013 part
+                                  3, same pattern as `prescreenHandler.ts`); this company's
+                                  not-yet-linked evidence is retroactively linked to the new
+                                  opportunity via `evidenceItems.opportunityId`; a summary line is
+                                  appended to `companies.notes`; and a `VERIFY` work item is
+                                  enqueued (`entityId` = the opportunity id — the first task type
+                                  whose `entityId` is an opportunity, not a company). Quota
+                                  exhaustion/other failures handled the same way as
+                                  `discoverHandler.ts`/`prescreenHandler.ts`/`researchHandler.ts`.
+    analyzeHandler.test.ts
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
@@ -200,6 +238,10 @@ scripts/
                                  (Phase 5's manual smoke-test entry point). `npm run research --
                                  --company <id>` for one, or `--all [--limit <n>]` for every
                                  PENDING RESEARCH item.
+  analyze.ts                     Runs real ANALYZE work items against the live `claude` CLI
+                                 (Phase 6's manual smoke-test entry point). `npm run analyze --
+                                 --company <id>` for one, or `--all [--limit <n>]` for every
+                                 PENDING ANALYZE item.
   hooks/
     captureSourceHook.ts          The ADR-0004 `PostToolUse` hook subprocess entry point (Phase
                                   5) — spawned directly by the `claude` CLI (via `--settings`,
@@ -212,7 +254,9 @@ scripts/
                                  `AOH_DB_PATH` (default `./data/aoh.db`).
 drizzle/
   0000_*.sql, meta/             Generated migration history (`npm run db:generate`).
-                                 Committed — this is real schema history, not build output.
+  0001_naive_mathemanic.sql     Phase 6: adds `opportunities.existing_alternatives` /
+                                 `validation_question`. Committed — this is real schema history,
+                                 not build output.
 docs/
   phases/
     phase-0-foundations.md     Phase 0 completion doc.
@@ -221,16 +265,18 @@ docs/
     phase-3-discovery-agent.md Phase 3 completion doc.
     phase-4-prescreening-agent.md Phase 4 completion doc.
     phase-5-deep-research-agent.md Phase 5 completion doc.
+    phase-6-opportunity-analysis-agent.md Phase 6 completion doc.
 ```
 
 Nothing under `src/app` or `src/worker.ts` exists yet — those are Phase 11+ (see PLAN.md's
-target layout for what's still to come). No dashboard and no agent past Deep Research exist yet.
-Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts`/
-`prescreenHandler.ts`/`researchHandler.ts` are still deterministic primitives only (pure
-functions over plain objects/arrays), not wired to `work_items` reads/writes — that wiring
-happens incrementally as each later phase's agent handler is built (Phase 6 onward) and finally
-in Phase 11's `worker.ts` loop, which is also what will actually run `campaignSelection.ts`
-autonomously instead of the operator picking a campaign by id via `scripts/discover.ts`.
+target layout for what's still to come). No dashboard and no agent past Opportunity Analysis
+exist yet. Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts`/
+`prescreenHandler.ts`/`researchHandler.ts`/`analyzeHandler.ts` are still deterministic primitives
+only (pure functions over plain objects/arrays), not wired to `work_items` reads/writes — that
+wiring happens incrementally as each later phase's agent handler is built (Phase 7 onward) and
+finally in Phase 11's `worker.ts` loop, which is also what will actually run
+`campaignSelection.ts` autonomously instead of the operator picking a campaign by id via
+`scripts/discover.ts`.
 
 ## `src/agents/claudeClient.ts`
 
@@ -429,17 +475,14 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   import it from real agent code.
 - `src/pipeline/stateMachine.ts`, `priority.ts`, `failureClassification.ts`, and
   `crashRecovery.ts` are still pure primitives with no live-DB wiring of their own beyond what
-  `discoverHandler.ts` (`DISCOVER`), `prescreenHandler.ts` (`PRESCREEN`), and
-  `researchHandler.ts` (`RESEARCH`) call directly. Phase 6 onward wires the rest incrementally;
-  Phase 11's `worker.ts` is what runs `crashRecovery` at startup and drives the main loop instead
-  of the operator invoking `scripts/discover.ts`/`scripts/prescreen.ts`/`scripts/research.ts` by
-  hand.
-- `ANALYZE` work items now exist in the live DB (created by `researchHandler.ts` on every
-  successful research run) but nothing consumes them yet — Phase 6's Opportunity Analysis Agent
-  is the first handler that will pick them up. The 8 real companies from Phases 3-4's manual
-  smoke tests are all `RESEARCHED` with a `PENDING` `ANALYZE` work item as of Phase 5's own
-  manual smoke test, ready for Phase 6 to exercise without needing a fresh
-  discovery/prescreen/research run.
+  `discoverHandler.ts` (`DISCOVER`), `prescreenHandler.ts` (`PRESCREEN`),
+  `researchHandler.ts` (`RESEARCH`), and `analyzeHandler.ts` (`ANALYZE`) call directly. Phase 7
+  onward wires the rest incrementally; Phase 11's `worker.ts` is what runs `crashRecovery` at
+  startup and drives the main loop instead of the operator invoking `scripts/discover.ts`/
+  `scripts/prescreen.ts`/`scripts/research.ts`/`scripts/analyze.ts` by hand.
+- `VERIFY` work items now exist in the live DB (created by `analyzeHandler.ts` on every
+  successful analysis) but nothing consumes them yet — Phase 7's Skeptical Verification Agent is
+  the first handler that will pick them up.
 - `src/pipeline/failureClassification.ts`'s pattern lists (transient vs. permanent error text)
   are a reasoned starting point, not exhaustive — Phase 3's live discovery runs didn't exercise
   the failure path (both real runs succeeded), so these patterns are still unvalidated against
@@ -449,8 +492,10 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   `lastDiscoveredAt`, `work_items.status`), and it does set `updatedAt` explicitly on every
   update, per DATABASE_SCHEMA.md's "Conventions." Later phases adding new update paths must do
   the same.
-- Opportunity scoring (`src/lib/scoring.ts`) is correct and tested in isolation but not wired to
-  any real `opportunity_evaluations` row yet — Phase 6 does that.
+- Opportunity scoring (`src/lib/scoring.ts`) is now wired to real `opportunity_evaluations` rows
+  (Phase 6, `src/pipeline/analyzeHandler.ts`) — the ten component values and penalty reasons come
+  from the Opportunity Analysis Agent's judgment, but the raw/adjusted arithmetic is always
+  `scoring.ts`'s, never Claude's (ADR-0013 part 1).
 - No worker loop or scheduler exists yet (Phase 11), so `campaignSelection.ts`'s
   weighted-round-robin selection state is never actually persisted anywhere — Phase 3 only
   proves the pure selection function works; an operator runs discovery one campaign at a time
@@ -462,10 +507,20 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   versioning has no per-call log to link against yet (ADR-0010 part 9).
 - `companies.notes` is now used for several purposes: genuine operator notes, a seeded
   `"Discovery reason: ..."` string (Phase 3, ADR-0010 part 7), a `"Prescreen (...): ..."` line
-  (Phase 4, ADR-0011 part 4), and now (Phase 5) a `"Research: N evidence item(s) recorded..."`
-  summary plus a `"Research candidate problems: ..."` line — none have a dedicated schema column
-  (ADR-0012 part 6). Revisit if a later phase (e.g. the Phase 12 dashboard) needs these
-  distinguished as structured fields rather than one free-text audit trail.
+  (Phase 4, ADR-0011 part 4), a `"Research: N evidence item(s) recorded..."` summary plus a
+  `"Research candidate problems: ..."` line (Phase 5, ADR-0012 part 6), and now (Phase 6) an
+  `"Analysis: opportunity \"...\" formed..."` line — none have a dedicated schema column. Revisit
+  if a later phase (e.g. the Phase 12 dashboard) needs these distinguished as structured fields
+  rather than one free-text audit trail.
+- Spec §59 (recognizing that two differently-worded opportunities for the same company represent
+  the same underlying problem) is not implemented — out of scope for Phase 6 (ADR-0013 part 7),
+  since nothing in the current pipeline can yet re-run `ANALYZE` for a company that already has an
+  opportunity. Revisit once `REFRESH_EVIDENCE`/re-research (Phase 14) exists.
+- `companies.lifecycleStatus`'s `RESEARCHED -> NO_OPPORTUNITY` transition (built Phase 1/2) is
+  still never exercised by any real code path — Phase 6 always forms an opportunity regardless of
+  score and leaves rejection to Phase 7's gate (ADR-0013 part 2). Whether anything should ever
+  drive a company to `NO_OPPORTUNITY` is an open question for a later phase (e.g. an
+  operator-manual dashboard action).
 - The evidence-provenance cross-check (ADR-0012 part 3: an evidence item's `sourceUrl` must
   match a hook-recorded `sources` row for that task) was exercised for real in this phase's live
   8-company smoke test, not just in fixtures: 1 of 23 evidence items for one company ("Animal

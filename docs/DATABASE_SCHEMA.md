@@ -106,18 +106,20 @@ Spec §26, §58.
 | problemDescription | text | |
 | problemCategory | text | free text, seeded from a category list but not constrained to it (spec §25) |
 | economicImpact | text | |
-| impactAssumptions | json | explicit known-vs-assumption list, spec §29 |
+| impactAssumptions | json | `{assumption: string, isKnown: boolean}[]` — explicit known-vs-assumption list, spec §29 (Phase 6) |
 | affectedRole | text | |
 | proposedSolution | text | |
 | implementationStrategy | text | |
 | dependencies | json | text[] |
 | risks | json | text[] |
+| existingAlternatives | json | text[] — possible existing alternatives (spec §26), added Phase 6 |
 | estimatedDurationDays | real | |
-| suggestedPriceMin | integer | cents |
+| suggestedPriceMin | integer | cents (Opportunity Analysis Agent expresses prices in whole currency units; the handler converts to cents at persist time, Phase 6) |
 | suggestedPriceMax | integer | cents |
 | recurringRevenuePossibility | text | nullable |
 | demoConcept | text | nullable |
 | confidence | real | |
+| validationQuestion | text | nullable — proposed validation question (spec §26), added Phase 6 |
 | status | enum | `OPPORTUNITY_IDENTIFIED \| VERIFICATION_PENDING \| VERIFIER_REJECTED \| VERIFIED \| OFFER_READY \| CONTACT_RESEARCH \| OUTREACH_READY \| SENT` — the opportunity-level portion of spec §90's flow. Terminates at `SENT`; see below. |
 | operatorFeedback | text | nullable |
 | rejectionReason | enum | nullable — `WEAK_EVIDENCE \| BAD_PROBLEM \| WOULDNT_BUY \| TOO_DIFFICULT \| TOO_SMALL \| TOO_LARGE \| ALREADY_SOLVED \| POOR_CONTACT \| BAD_PRICE \| REGULATORY_RISK \| GENERIC_IDEA \| NOT_INTERESTING \| OTHER` (spec §46, verbatim) |

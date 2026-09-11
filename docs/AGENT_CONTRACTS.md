@@ -73,10 +73,11 @@ are not negotiable per-call instructions, they're baked into the prompt template
 
 ## 4. Opportunity Analysis Agent (Phase 6)
 
-**Input:** one company's evidence items (FACT/INFERENCE/HYPOTHESIS/UNKNOWN) + candidate
-problems from Deep Research. Never sees other companies.
+**Input:** one company's evidence items (FACT/INFERENCE/HYPOTHESIS/UNKNOWN, with their source
+URLs) + free-text prior-stage notes (including Deep Research's candidate problems, per spec §26).
+Never sees other companies.
 
-**Output:**
+**Output** (as actually implemented, `src/agents/opportunityAnalysisAgent.ts`):
 ```ts
 z.object({
   problemTitle: z.string(),
@@ -90,17 +91,39 @@ z.object({
   dependencies: z.array(z.string()),
   risks: z.array(z.string()),
   existingAlternatives: z.array(z.string()),
-  estimatedDurationDays: z.number(),
-  suggestedPriceMin: z.number(),
-  suggestedPriceMax: z.number(),
+  estimatedDurationDays: z.number().nonnegative(),
+  // Whole currency units (e.g. 750 == EUR 750), not cents — the handler converts at persist time.
+  suggestedPriceMin: z.number().nonnegative(),
+  suggestedPriceMax: z.number().nonnegative(), // must be >= suggestedPriceMin
   recurringRevenuePossibility: z.string().nullable(),
   demoConcept: z.string().nullable(),
   confidence: z.number().min(0).max(1),
   validationQuestion: z.string(),
+  // The ten spec §30 scoring judgments — Claude's inputs to the formula, never the formula's
+  // own output. Ranges/keys are derived programmatically from src/lib/scoring.ts so this
+  // contract can't drift out of sync with what the deterministic scorer enforces.
+  scoreComponents: z.object({
+    evidenceStrength: z.number().int().min(0).max(20),
+    painSeverity: z.number().int().min(0).max(15),
+    economicImpactScore: z.number().int().min(0).max(15),
+    deliverability: z.number().int().min(0).max(15),
+    purchaseLikelihood: z.number().int().min(0).max(10),
+    speedToValue: z.number().int().min(0).max(5),
+    reachability: z.number().int().min(0).max(5),
+    demonstrability: z.number().int().min(0).max(5),
+    repeatability: z.number().int().min(0).max(5),
+    urgency: z.number().int().min(0).max(5),
+  }),
+  // Spec §31's ten named reasons (src/lib/scoring.ts's PENALTY_CATALOG) — can be empty.
+  penaltyReasons: z.array(z.enum([/* PENALTY_CATALOG keys */])),
 })
 ```
-Raw score (spec §30) is **not** produced by Claude — `src/lib/scoring.ts` computes it
-deterministically from this output + the linked evidence. Claude does not self-score.
+Raw/adjusted score (spec §30) are **not** produced by Claude — `src/lib/scoring.ts` sums
+`scoreComponents` and subtracts `penaltyReasons`' catalog amounts deterministically. Claude
+supplies the judgment inputs to the formula, never the formula's own output (and even if it did
+emit a `rawScore`/`adjustedScore` field, the non-strict Zod schema silently drops unknown keys,
+so there's no code path where a Claude-supplied number could reach the database). Uses the
+`"reasoning"` model tier and no tools — see ADR-0013.
 
 ## 5. Skeptical Verification Agent (Phase 7)
 

@@ -142,6 +142,14 @@ export const companies = sqliteTable("companies", {
 
 // --- opportunities -----------------------------------------------------
 
+/** Spec §29's core requirement: every ROI-relevant line must be tagged as either a known value
+ * (`isKnown: true`, traceable to FACT evidence) or an assumption (`isKnown: false`) — never
+ * presented as one undifferentiated list (Phase 6). */
+export interface ImpactAssumption {
+  assumption: string;
+  isKnown: boolean;
+}
+
 export const opportunities = sqliteTable("opportunities", {
   id: id(),
   companyId: text("company_id")
@@ -151,20 +159,24 @@ export const opportunities = sqliteTable("opportunities", {
   problemDescription: text("problem_description").notNull(),
   problemCategory: text("problem_category").notNull(),
   economicImpact: text("economic_impact"),
-  impactAssumptions: text("impact_assumptions", { mode: "json" }).$type<
-    string[]
-  >(),
+  impactAssumptions: text("impact_assumptions", {
+    mode: "json",
+  }).$type<ImpactAssumption[]>(),
   affectedRole: text("affected_role"),
   proposedSolution: text("proposed_solution").notNull(),
   implementationStrategy: text("implementation_strategy"),
   dependencies: text("dependencies", { mode: "json" }).$type<string[]>(),
   risks: text("risks", { mode: "json" }).$type<string[]>(),
+  existingAlternatives: text("existing_alternatives", {
+    mode: "json",
+  }).$type<string[]>(),
   estimatedDurationDays: real("estimated_duration_days"),
   suggestedPriceMin: integer("suggested_price_min"),
   suggestedPriceMax: integer("suggested_price_max"),
   recurringRevenuePossibility: text("recurring_revenue_possibility"),
   demoConcept: text("demo_concept"),
   confidence: real("confidence"),
+  validationQuestion: text("validation_question"),
   // Opportunity-specific portion of the spec §90 flow, from formation
   // through handing off to outreach. Terminates at SENT: what happens after
   // an outreach draft is sent (REPLIED/INTERESTED/MEETING/WON/LOST/...) is

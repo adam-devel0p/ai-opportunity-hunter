@@ -583,3 +583,94 @@ phase produces and should treat a company with few/no evidence items as a legiti
 evidence" input, not an error state. Phase 14 (re-research eligibility, spec §60) is the natural
 place to revisit both freshness constants and to actually exercise `sourceFreshness.ts`'s `STALE`
 branch by recomputing freshness for existing rows on read.
+
+---
+
+## ADR-0013: Phase 6 (Opportunity Analysis Agent + scoring) judgment calls
+
+**Status:** Accepted (Phase 6).
+
+**Decision, part 1 — the agent supplies score components + penalty reasons; `scoring.ts` alone
+computes the final numbers:** AGENT_CONTRACTS.md §4's original draft output had no scoring-related
+fields at all, but spec §30's ten components ("evidence strength," "pain severity," etc.) and
+§31's penalty reasons are themselves judgment calls requiring the evidence in context — exactly
+the kind of reasoning Claude should do, per PLAN.md's "Core engineering philosophy" (Claude for
+genuine judgment; arithmetic stays deterministic code). `opportunityAnalysisAgent.ts` therefore
+adds `scoreComponents` (the ten integers, each range-checked by Zod) and `penaltyReasons` (an enum
+array) to the output contract, and `analyzeHandler.ts` is the only thing that calls
+`scoring.ts`'s `scoreOpportunity()` to turn them into `rawScore`/`adjustedScore` — "Claude does not
+self-score" (AGENT_CONTRACTS.md's existing language) means the *final* number is never taken from
+Claude, not that the underlying judgments can't be. The Zod schema's ranges/enum values are
+derived programmatically from `SCORE_COMPONENT_RANGES`/`PENALTY_CATALOG` (`src/lib/scoring.ts`)
+rather than hand-duplicated, so the agent's contract structurally cannot drift out of sync with
+what the deterministic scorer enforces. As a side benefit of Zod's non-strict-by-default parsing,
+even a hallucinated `rawScore`/`adjustedScore` field in the model's raw JSON is silently dropped
+during validation — there is no code path where a Claude-supplied final score could reach the
+database, even accidentally.
+
+**Decision, part 2 — every completed `ANALYZE` task always forms exactly one opportunity,
+regardless of score:** PLAN.md's Phase 6 acceptance criteria describe both the §88 bad-opportunity
+fixture and the §89 correct-reasoning fixture as producing *opportunities* (one scoring low, one
+scoring moderate/high) — neither is described as producing no record at all. `analyzeHandler.ts`
+therefore never declines to form an opportunity; deciding an opportunity is too weak to pursue
+further is Phase 7's job (the Skeptical Verifier + the gating threshold, spec §32), which already
+has a dedicated `VERIFIER_REJECTED` status for exactly this. This also sidesteps a schema gap:
+neither AGENT_CONTRACTS.md's draft nor the current output contract has any "no viable opportunity"
+discriminator, and the `companies.lifecycleStatus` enum's `RESEARCHED -> NO_OPPORTUNITY` transition
+(built in Phase 1/2, before this agent existed) is consequently never exercised by this phase —
+left as a possible future use (e.g. an operator-manual dashboard action in Phase 12, or a later
+phase's decision to add a real "no opportunity" agent output) rather than wired to anything now.
+A company's `lifecycleStatus` itself is untouched by this handler — it already reached its
+terminal `RESEARCHED` value in Phase 5, and forming an opportunity doesn't change it (ADR-0008
+part 2: opportunity-stage progress lives on `opportunities.status`, not the company's column).
+
+**Decision, part 3 — a formed opportunity is persisted straight at `VERIFICATION_PENDING`, not
+`OPPORTUNITY_IDENTIFIED`, in one write:** Same reasoning and pattern as ADR-0011 part 5
+(`prescreenHandler.ts`'s `PRESCREENED -> RESEARCH_PENDING` collapse) — this handler both forms the
+opportunity *and* immediately enqueues its `VERIFY` work item in the same call, so there's no
+window where a durably-visible `OPPORTUNITY_IDENTIFIED` row matters on its own.
+`transitionOpportunityStatus("OPPORTUNITY_IDENTIFIED", "VERIFICATION_PENDING")` is still called
+(so an invalid move would still throw), but only the final status is written.
+
+**Decision, part 4 — the agent gets no tools and the `"reasoning"` model tier:** Unlike Discovery/
+Pre-Screening/Deep Research, this agent only reasons over evidence Deep Research already gathered
+— there is nothing left to fetch or search, so `tools: []` (ADR-0007 requires every call to state
+its tools explicitly; there is no implicit default). Spec §52 groups "complex opportunity
+reasoning" under the more-capable-model column, same tier choice as Deep Research (ADR-0012 part
+4) and for the same reason: this is open-ended judgment (is this friction meaningful? what's a
+sensible price?), not narrow classification.
+
+**Decision, part 5 — prices are expressed in whole currency units by the agent, converted to
+cents at persist time:** DATABASE_SCHEMA.md's `suggestedPriceMin`/`Max` columns are integer cents,
+but asking a language model to reason in cents (spec §29's own ROI example uses whole-euro
+figures) invites unit errors. The agent's Zod schema keeps `suggestedPriceMin`/`Max` as plain
+nonnegative numbers in whole currency units; `analyzeHandler.ts` multiplies by 100 (rounded) when
+inserting into the DB. A `superRefine` on the Zod schema also rejects `suggestedPriceMax <
+suggestedPriceMin` as a cheap, deterministic sanity check before persistence.
+
+**Decision, part 6 — `existingAlternatives` and `validationQuestion` columns added to
+`opportunities`, and `impactAssumptions`'s stored type corrected to
+`{assumption, isKnown}[]`:** AGENT_CONTRACTS.md's draft output already listed both fields (spec
+§26 explicitly requires "possible existing alternatives" and a "proposed validation question"),
+but Phase 1's schema never added dedicated columns for them, and `impactAssumptions` was typed as
+a bare `string[]` — which cannot represent spec §29's core "known vs. assumption" requirement at
+all. All three are genuine Phase 1 gaps, not new scope: two new nullable/json columns (migration
+`0001_naive_mathemanic.sql`) and a TypeScript-only type correction on an already-JSON column (no
+migration needed for that one). Evidence for a company is retroactively linked to its newly formed
+opportunity (`evidence_items.opportunityId`, previously null) at analysis time, per
+DATABASE_SCHEMA.md's stated dashboard query pattern ("filtered by classification" off of
+`opportunityId`).
+
+**Decision, part 7 — spec §59 (fuzzy duplicate-opportunity detection) is out of scope for this
+phase:** PLAN.md's Phase 6 "Build" list doesn't mention it, and nothing in the current pipeline can
+yet trigger the scenario it guards against (re-analyzing a company that already has a rejected
+opportunity for essentially the same problem) — `REFRESH_EVIDENCE`/re-research wiring is Phase 14
+scope, and today an `ANALYZE` item is only ever created once per company by `researchHandler.ts`.
+Flagged here as a deliberate exclusion, same category as prior phases' forward-looking gaps.
+
+**Consequences:** Phase 7 (Skeptical Verification) reads `opportunity_evaluations` rows this phase
+produces and owns the actual `KEEP`/`REJECT` decision + gating threshold (~75/100) that ADR-0008's
+penalty values were chosen against. Phase 12's dashboard will need `evidence_items.opportunityId`
+(now populated) to render the WHAT WE KNOW/INFER/DON'T KNOW breakdown per spec §85.
+
+---

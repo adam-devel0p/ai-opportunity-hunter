@@ -12,7 +12,7 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 3 | Discovery Agent + campaigns | ✅ | [phase-3-discovery-agent.md](phases/phase-3-discovery-agent.md) |
 | 4 | Pre-Screening Agent | ✅ | [phase-4-prescreening-agent.md](phases/phase-4-prescreening-agent.md) |
 | 5 | Deep Research Agent + evidence model | ✅ | [phase-5-deep-research-agent.md](phases/phase-5-deep-research-agent.md) |
-| 6 | Opportunity Analysis Agent + scoring | ⬜ | — |
+| 6 | Opportunity Analysis Agent + scoring | ✅ | [phase-6-opportunity-analysis-agent.md](phases/phase-6-opportunity-analysis-agent.md) |
 | 7 | Skeptical Verification Agent + gating | ⬜ | — |
 | 8 | Offer Builder + pricing | ⬜ | — |
 | 9 | Contact Research Agent | ⬜ | — |
@@ -22,8 +22,8 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 6 — Opportunity Analysis Agent + scoring
-**Next phase:** 7 — Skeptical Verification Agent + gating
+**Current phase:** 7 — Skeptical Verification Agent + strong-opportunity gating
+**Next phase:** 8 — Offer Builder + pricing
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -87,6 +87,25 @@ and new ADR-0012 for the judgment calls made (hook delivery mechanism and matche
 env-var-based hook context passing, the sourceUrl↔source cross-check and its drop policy, model
 tier, unconditional `RESEARCHED` transition + `ANALYZE` enqueueing, notes-field conventions, and
 the two new freshness-threshold constants).
+
+Phase 6 added the fourth real agent: the Opportunity Analysis Agent
+(`src/agents/opportunityAnalysisAgent.ts`, reasoning model tier, no tools) and the `ANALYZE`
+work-item handler (`src/pipeline/analyzeHandler.ts`) that turns a company's evidence into a
+scored opportunity. The agent supplies the ten spec §30 score-component judgments and any spec
+§31 penalty reasons; `src/lib/scoring.ts` (built Phase 1, unused until now) is the only thing
+that ever sums/subtracts them into `rawScore`/`adjustedScore` — Claude never supplies a final
+score. Every successful `ANALYZE` run forms exactly one `opportunities` + `opportunity_evaluations`
+row regardless of score (rejecting weak ones is Phase 7's job), persisted straight at
+`VERIFICATION_PENDING`, with the company's evidence retroactively linked via `opportunityId` and
+a `VERIFY` work item enqueued. Two new `opportunities` columns (`existingAlternatives`,
+`validationQuestion`) and a corrected `impactAssumptions` type
+(`{assumption, isKnown}[]`, not bare `string[]`) closed a Phase-1 schema gap needed for spec §29's
+known-vs-assumption requirement. Manually verified live against all 8 real veterinary clinics from
+Phases 3-5 — see [phase-6-opportunity-analysis-agent.md](phases/phase-6-opportunity-analysis-agent.md)
+and new ADR-0013 for the judgment calls made (score components/penalties as agent-supplied
+judgment inputs vs. deterministic arithmetic, always forming an opportunity regardless of score,
+the single-write status collapse, tool/model-tier choice, currency-unit-to-cents conversion, the
+two schema fixes, and spec §59 deferral).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

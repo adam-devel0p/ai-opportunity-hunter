@@ -140,13 +140,19 @@ describe("insert/read round trips", () => {
         problemCategory: "manual-data-entry",
         proposedSolution: "Automate intake with a simple form + webhook.",
         status: "OPPORTUNITY_IDENTIFIED",
-        impactAssumptions: ["2 staff", "5h/week"],
+        impactAssumptions: [
+          { assumption: "2 staff", isKnown: true },
+          { assumption: "5h/week", isKnown: false },
+        ],
         dependencies: [],
         risks: ["Owner may resist changing existing process"],
       })
       .returning()
       .all();
-    expect(opportunity?.impactAssumptions).toEqual(["2 staff", "5h/week"]);
+    expect(opportunity?.impactAssumptions).toEqual([
+      { assumption: "2 staff", isKnown: true },
+      { assumption: "5h/week", isKnown: false },
+    ]);
 
     const [source] = db
       .insert(sources)
