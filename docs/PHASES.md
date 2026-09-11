@@ -19,11 +19,12 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 10 | Outreach Writer | ✅ | [phase-10-outreach-writer.md](phases/phase-10-outreach-writer.md) |
 | 11 | Autonomous scheduler/worker | ✅ | [phase-11-autonomous-worker.md](phases/phase-11-autonomous-worker.md) |
 | 12 | Dashboard MVP | ✅ | [phase-12-dashboard-mvp.md](phases/phase-12-dashboard-mvp.md) |
-| 13 | Feedback loop & outcome analytics | ⬜ | — |
+| 13 | Feedback loop & outcome analytics | ✅ | [phase-13-feedback-loop-analytics.md](phases/phase-13-feedback-loop-analytics.md) |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 13 — Feedback loop & outcome analytics
-**Next phase:** 14 — Operational hardening
+**Current phase:** 14 — Operational hardening
+**Next phase:** — (last planned phase; see PLAN.md's "Deferred beyond these phases" for what
+comes after)
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -245,6 +246,23 @@ opportunity produced by Phases 3-11's live smoke tests was `VERIFIER_REJECTED`, 
 never been a real `VERIFIED`/`OUTREACH_READY` opportunity to view; PLAN.md's own "manual UX
 walkthrough... using data produced by earlier phases" acceptance criterion is deferred until one
 exists.
+
+Phase 13 added the feedback loop's read side: `src/lib/outcomeAnalytics.ts` (spec §47, §74) —
+`getOverallOutcomeMetrics` (sent count, reply/positive-reply/meeting/win rates, average
+opportunity score, score-vs-response) and `getPerformanceByDimension` (the same stats grouped by
+industry/country/problem category/campaign/price band) — both built over the `outreach_outcomes`
+table Phase 12 already wrote to, with no schema changes needed. Every rate/average carries its own
+sample size and a `reliable` flag (`DEFAULT_MIN_SAMPLE_SIZE = 5`) so a 1-of-1 "100% reply rate"
+can never be presented as meaningful (spec §74's explicit small-sample-size requirement), rendered
+on a new `/analytics` dashboard page as a "low sample" badge rather than being hidden outright. No
+new agent, no new tables. See
+[phase-13-feedback-loop-analytics.md](phases/phase-13-feedback-loop-analytics.md) and new
+ADR-0020 for the six judgment calls made (no schema changes, `SENT`-event-based "sent"
+definition, the `{value, sampleSize, reliable}` stat shape, one parameterized dimension function,
+`averageOpportunityScore`'s all-scored-opportunities scope vs. `scoreVsResponse`'s sent-only
+scope, and the stacked-tables page layout). No real outreach outcome data exists yet — same
+`VERIFIER_REJECTED` blocker Phases 8-10 already hit — so `/analytics` has only been verified
+against seeded fixture data.
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

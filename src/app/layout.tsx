@@ -18,6 +18,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <Link href="/">Dashboard</Link>
           <Link href="/opportunities">Opportunities</Link>
           <Link href="/companies">Companies</Link>
+          <Link href="/analytics">Analytics</Link>
           <Link href="/companies/new">Research a company</Link>
         </nav>
         <div className="app-shell">{children}</div>

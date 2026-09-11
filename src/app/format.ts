@@ -21,3 +21,13 @@ export function formatDate(date: Date | null | undefined): string {
   if (!date) return "—";
   return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
+
+export function formatPercent(rate: number | null | undefined): string {
+  if (rate == null) return "—";
+  return `${Math.round(rate * 100)}%`;
+}
+
+export function formatScore(average: number | null | undefined): string {
+  if (average == null) return "—";
+  return average.toFixed(1);
+}

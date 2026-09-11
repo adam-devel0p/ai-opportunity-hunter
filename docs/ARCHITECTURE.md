@@ -4,12 +4,13 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 12 (Dashboard MVP) — complete. See
-[phases/phase-12-dashboard-mvp.md](phases/phase-12-dashboard-mvp.md) for the full writeup.
+**Last updated:** Phase 13 (Feedback loop & outcome analytics) — complete. See
+[phases/phase-13-feedback-loop-analytics.md](phases/phase-13-feedback-loop-analytics.md) for the
+full writeup.
 
 ## Status
 
-Phases 0-12 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-13 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
 normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
 primitives (priority selection, lifecycle transition validation, failure classification, crash
@@ -49,7 +50,12 @@ list + full detail page (evidence UX, the spec §85 human-trust panel, every spe
 action), a spec §69 activity feed, the spec §71 autonomous pause/resume toggle, and spec §72's
 manual research entry point — built on new plain `src/lib` modules
 (`dashboardQueries.ts`/`dashboardActions.ts`/`activity.ts`) the Next.js server components/actions
-just wire up. See the dedicated section below. PLAN.md Phase 13 (feedback loop/outcome analytics)
+just wire up. And now Phase 13's feedback loop read side: `src/lib/outcomeAnalytics.ts` (spec §47,
+§74) aggregates the `outreach_outcomes` table Phase 12 already wrote to — overall reply/positive-
+reply/meeting/win rates and average opportunity score, plus the same broken down by industry/
+country/problem category/campaign/price band — every rate/average hedged with its own sample size
+and a small-sample-size `reliable` flag, surfaced on a new `/analytics` dashboard page. No schema
+changes, no new agent. See the dedicated sections below. PLAN.md Phase 14 (operational hardening)
 onward from here.
 
 ## Actual stack in use
@@ -289,6 +295,19 @@ src/
     appDb.ts                       `getDb()` (Phase 12) — a `globalThis`-cached `Db` singleton
                                     for the Next.js process, so dev-mode hot reloads don't leak
                                     `better-sqlite3` connections.
+    outcomeAnalytics.ts             `getOverallOutcomeMetrics`/`getPerformanceByDimension` (spec
+                                    §47, §74, Phase 13) — the feedback-loop aggregate queries:
+                                    reply/positive-reply/meeting/win rates, average opportunity
+                                    score, score-vs-response, and the same broken down by
+                                    industry/country/problem category/campaign/price band. Every
+                                    rate (`computeRateStat`) and average (`computeAverageStat`)
+                                    carries its own sample size and a `reliable` flag against
+                                    `DEFAULT_MIN_SAMPLE_SIZE = 5` (ADR-0020 part 3) — spec §74's
+                                    small-sample-size guard. No new tables; aggregates entirely
+                                    over `outreach_outcomes`/`outreach_drafts`/`opportunities`/
+                                    `companies`/`offers`/`discovery_campaigns` rows Phase 12
+                                    already wrote to (ADR-0020 part 1).
+    outcomeAnalytics.test.ts
   pipeline/
     stateMachine.ts              Lifecycle transition validators for all three §90-derived
                                   enums (company/opportunity/work-item), each its own table +
@@ -483,6 +502,11 @@ src/
       [id]/page.tsx                 Company detail — lifecycle status, notes, linked
                                     opportunities.
       new/page.tsx                  Manual research entry form (spec §72).
+    analytics/
+      page.tsx                     Outcome analytics (spec §47, §74, Phase 13) — overall metric
+                                    tiles, score-vs-response, five stacked performance-by-dimension
+                                    tables. Reads `src/lib/outcomeAnalytics.ts` directly, same
+                                    server-component-only pattern as every other dashboard page.
     actions/
       autonomous.ts                 `toggleAutonomousMode` — thin wrapper over
                                     `src/lib/config.ts`.
@@ -588,11 +612,13 @@ docs/
     phase-10-outreach-writer.md Phase 10 completion doc.
     phase-11-autonomous-worker.md Phase 11 completion doc.
     phase-12-dashboard-mvp.md  Phase 12 completion doc.
+    phase-13-feedback-loop-analytics.md Phase 13 completion doc.
 ```
 
-`src/app` now holds the Phase 12 dashboard (see the dedicated section below). Phase 10's Outreach
-Writer remains the last *agent* in the core pipeline — Phase 12 built the dashboard, not new
-agents, and Phase 13 (feedback loop/outcome analytics) onward doesn't add new agents either.
+`src/app` now holds the Phase 12 dashboard plus Phase 13's `/analytics` page (see the dedicated
+sections below). Phase 10's Outreach Writer remains the last *agent* in the core pipeline —
+Phases 12-13 built dashboard UI and read-side analytics, not new agents, and Phase 14 (operational
+hardening) doesn't add one either.
 Phase 2's `src/pipeline/` modules besides
 `campaignSelection.ts`/`discoverHandler.ts`/`prescreenHandler.ts`/`researchHandler.ts`/
 `analyzeHandler.ts`/`verifyHandler.ts`/`offerHandler.ts`/`contactHandler.ts`/`outreachHandler.ts`
@@ -797,7 +823,8 @@ so filters are just query params a server component reads).
 - Pages: `/` (summary metrics, autonomous toggle, activity feed), `/opportunities` (list +
   filters), `/opportunities/[id]` (full card, evidence UX, trust panel, every operator action),
   `/companies` (list + search), `/companies/[id]` (detail — mainly a landing page for manual
-  research), `/companies/new` (spec §72's entry form). Every list/detail page sets
+  research), `/companies/new` (spec §72's entry form), `/analytics` (Phase 13's outcome analytics
+  — see the dedicated bullet below). Every list/detail page sets
   `export const dynamic = "force-dynamic"` — this is a single-operator app reading live pipeline
   state, and there is no reason for Next to ever serve a stale cached render of it.
 - Spec §85's six trust labels (WHY CLAUDE LIKES THIS / WHY THE SKEPTIC MIGHT REJECT IT / WHAT WE
@@ -837,6 +864,15 @@ so filters are just query params a server component reads).
   `claude` CLI — ADR-0019 part 9). Covers every PLAN.md Phase 12 acceptance-criterion scenario:
   viewing the full evidence trail, approve/reject with a reason, marking sent, toggling
   autonomous mode, and manual company entry queuing a real (fixture-seeded) pipeline run.
+- `/analytics` (Phase 13, spec §47/§74): reads `src/lib/outcomeAnalytics.ts` directly (same
+  zero-client-JS server-component pattern as every other page). Overall metric tiles (sent count,
+  four rates, average opportunity score), a score-vs-response comparison, and five stacked
+  "performance by X" tables (industry/country/problem category/campaign/price band) — each rate
+  cell renders a "low sample" badge (reusing the existing `.badge--warn` style) whenever that
+  cell's `reliable` flag is false, rather than presenting a tiny-sample percentage as trustworthy.
+  Not covered by the Playwright suite (Phase 13 added no new e2e scenarios — its acceptance
+  criteria only call for unit tests on the aggregate calculations); verified manually this phase
+  against a seeded temporary fixture DB instead. See ADR-0020.
 
 ## `src/config/models.ts`
 
@@ -1018,9 +1054,10 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   extend its pattern lists once real drafts are checked against it.
 - `outreachHandler.ts` (Phase 10) is the first handler that does not transition
   `opportunities.status` or enqueue a further work item on success (ADR-0017 part 5) — this is
-  intentional (sending is a manual operator action), but means `OUTREACH_READY -> SENT` and
-  `outreach_outcomes` recording have no code path at all yet; that's Phase 12 (dashboard action)
-  and Phase 13 (outcome analytics) territory.
+  intentional (sending is a manual operator action) — Phase 12's `markSentManually`/
+  `recordOutreachOutcome` (`src/lib/dashboardActions.ts`) are what actually drive
+  `OUTREACH_READY -> SENT` and `outreach_outcomes` recording, and Phase 13's
+  `src/lib/outcomeAnalytics.ts` is what reads that history back out as rates/averages.
 - `contacts` has no `opportunityId` column, so `outreachHandler.ts` looks up "the most recent
   contact row for this opportunity's company" by `createdAt desc` rather than a direct join
   (ADR-0017 part 6) — correct today because Phase 9 inserts exactly one contact immediately
@@ -1065,3 +1102,17 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   webpack currently honors the `experimental.extensionAlias` config this project's shared
   NodeNext-style `.js`-suffixed imports need — revisit if a future Next release adds equivalent
   Turbopack support (Turbopack is the Next 16 default otherwise).
+- No real outreach outcome data exists yet for `/analytics` (Phase 13) to summarize — same
+  `VERIFIER_REJECTED` blocker as Phases 8-10's deferred live smoke tests. It has only been
+  exercised against a seeded temporary fixture DB (see
+  [phase-13-feedback-loop-analytics.md](phases/phase-13-feedback-loop-analytics.md)'s "Testing
+  performed"); a real read of it is pending the first real `SENT` outreach draft plus outcome
+  events.
+- `DEFAULT_MIN_SAMPLE_SIZE = 5` (`src/lib/outcomeAnalytics.ts`, Phase 13, ADR-0020 part 3) is a
+  reasoned starting point, not empirically tuned — same category as every earlier phase's
+  placeholder constants. No `system_config` wiring lets an operator change it without a code
+  change yet.
+- Spec §75 (Claude periodically reviewing outcome analytics and recommending discovery-allocation
+  changes) and §76 (recurring-pattern detection across companies) remain unimplemented by design —
+  explicitly deferred per PLAN.md's "Deferred beyond these phases" list. Phase 13 only produces
+  the statistics; nothing consumes them autonomously.

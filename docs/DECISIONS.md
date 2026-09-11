@@ -1296,3 +1296,75 @@ real multi-hour `npm run worker` session (with autonomous mode enabled) at least
 phase's scheduling/backoff design against real usage patterns.
 
 ---
+
+## ADR-0020: Phase 13 (Feedback loop & outcome analytics) judgment calls
+
+**Status:** Accepted (Phase 13).
+
+**Decision, part 1 — no new tables or columns; analytics are computed entirely from existing
+`outreach_outcomes`/`outreach_drafts`/`opportunities`/`companies`/`offers`/`discovery_campaigns`
+rows:** Phase 12 (ADR-0019) already built the full outcome-recording write path
+(`dashboardActions.recordOutreachOutcome`/`markSentManually`) and the `outreach_outcomes` table
+spec §47 needs for outcome *history* (append-only events, not a single current-status column).
+Phase 13's job is purely the read side — aggregating what's already persisted — so no migration
+was needed this phase, unlike most earlier phases.
+
+**Decision, part 2 — "sent" is defined as "this draft has a `SENT` outreach_outcomes event", not
+"`outreach_drafts.status === 'SENT_MANUALLY'`":** The two are written atomically together by
+`markSentManually` and are equivalent in practice today, but the event is the more semantically
+direct denominator for every rate (`REPLIED`/`INTERESTED`/`MEETING`/`WON` are all events on the
+same table) — reading one source of truth for "was this actually sent" avoids a future drift bug
+if `outreach_drafts.status` ever gains a value that doesn't imply a `SENT` event (or vice versa).
+
+**Decision, part 3 — every rate is `{numerator, denominator, rate, reliable}`, never a bare
+percentage, and every average is `{average, sampleSize, reliable}`:** Spec §74's explicit
+"avoid misleading metrics when sample sizes are tiny" requirement means a component that only
+gets the final percentage can't apply that guard itself. `DEFAULT_MIN_SAMPLE_SIZE = 5` (a
+code-constant default, same "config as an optional parameter" pattern as `opportunityGate.ts`/
+`pricing.ts`) is a judgment call, not from the spec — small enough that a genuinely useful
+signal isn't hidden for long, large enough that a 1-of-1 or 2-of-3 rate is never presented as
+reliable. The dashboard renders a "low sample" badge next to any rate below the threshold rather
+than hiding the number outright — spec §74 says "avoid misleading", not "hide small-sample data",
+and an operator with only 3 outreach attempts still benefits from seeing the raw numbers as long
+as they're clearly hedged.
+
+**Decision, part 4 — "performance by X" (industry/country/problem category/campaign/price band)
+is one parameterized function (`getPerformanceByDimension(db, dimension)`) over a shared
+per-sent-draft record, not five separate queries:** All five breakdowns in spec §47/§74 are the
+same shape (group sent outreach by one field, compute the same five stats per group) — a single
+`SentOutreachRecord` gathered once per call and grouped by whichever dimension the caller asks
+for keeps the five metric definitions from drifting relative to each other, at the cost of always
+computing all five DB reads even when only one dimension is requested (acceptable at this app's
+scale, same tradeoff `dashboardQueries.ts` already made). Missing/null dimension values fall back
+to a stable label (`"Unknown"`, or `"Manual / no campaign"` for campaign specifically, since a
+manually-entered company via spec §72 has no `sourceCampaignId` by design) rather than being
+dropped from the breakdown — an operator should be able to see "how many of my sent emails have
+no industry recorded" as its own row, not have it silently vanish.
+
+**Decision, part 5 — `averageOpportunityScore` (spec §74's "average opportunity score") is
+computed over every scored opportunity, not just ones with outreach sent, while
+`scoreVsResponse` is computed only over sent ones:** These answer different questions — the
+former is a pipeline-quality signal (are the opportunities Phase 6 is generating any good at
+all?), the latter is specifically "do higher-scored opportunities get replies more often?", which
+is only measurable for opportunities that actually reached outreach. Conflating them would make
+the first number meaningless once real usage produces far more scored opportunities than sent
+outreach (the expected steady state, per every earlier phase's funnel).
+
+**Decision, part 6 — analytics live at a new `/analytics` dashboard route (plain server
+component, five stacked tables + a metrics-grid header), not a client-side tabbed view:** Spec
+§74 lists the same "show simple metrics" framing Phase 12's summary tiles already use, and this
+is a single-operator local app with a handful of dimension values at realistic scale — a
+client-side tab/filter UI would add `"use client"` state management for a problem stacked
+sections solve for free. Revisit only if a later phase's real usage shows the page has grown
+unwieldy to scroll.
+
+**Consequences:** Spec §75 (autonomous strategy improvement — Claude periodically reviewing this
+same data and recommending discovery-allocation changes) and §76 (recurring-pattern detection
+across companies) remain explicitly out of scope, per PLAN.md's "Deferred beyond these phases"
+list — this phase only produces the statistics a human or a future Claude pass would consume, it
+does not consume them itself. No live real-world outreach data exists yet (every opportunity
+produced by Phases 3-11's live smoke tests was `VERIFIER_REJECTED`, same blocker ADR-0015/16/17
+already documented), so `/analytics` has only ever been exercised against seeded fixture data
+this phase; a real read of it is still pending the first real `SENT` outreach draft.
+
+---
