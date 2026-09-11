@@ -18,12 +18,12 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 9 | Contact Research Agent | ✅ | [phase-9-contact-research-agent.md](phases/phase-9-contact-research-agent.md) |
 | 10 | Outreach Writer | ✅ | [phase-10-outreach-writer.md](phases/phase-10-outreach-writer.md) |
 | 11 | Autonomous scheduler/worker | ✅ | [phase-11-autonomous-worker.md](phases/phase-11-autonomous-worker.md) |
-| 12 | Dashboard MVP | ⬜ | — |
+| 12 | Dashboard MVP | ✅ | [phase-12-dashboard-mvp.md](phases/phase-12-dashboard-mvp.md) |
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 12 — Dashboard MVP
-**Next phase:** 13 — Feedback loop & outcome analytics
+**Current phase:** 13 — Feedback loop & outcome analytics
+**Next phase:** 14 — Operational hardening
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -218,6 +218,33 @@ judgment calls made (reusing `DEFERRED` as the quota signal, worker-owned vs. pe
 the try/catch handler wrapping, the new config accessor's deliberately narrow scope, autonomous
 mode's safe default, the discovery-replenishment design, `dbPath` threading through a shared
 handler type, the `REFRESH_EVIDENCE` stub, and the deferred live multi-hour run).
+
+Phase 12 added the first UI: a Next.js (App Router) dashboard under `src/app` (spec §42-46, §69,
+§71-73, §85), built on new plain DB-only modules in `src/lib` (`dashboardQueries.ts`,
+`dashboardActions.ts`, `activity.ts`) that the `src/app` server components/actions just wire up —
+summary metrics, an opportunity list with basic filters, a full opportunity detail page (evidence
+UX, the spec §85 human-trust panel mapped from existing fields, and every spec §45 operator
+action including the spec §46 rejection-reason picker), a spec §69 activity feed derived from
+`work_items` at read time rather than a new event table, the spec §71 autonomous pause/resume
+toggle, and spec §72's manual "research this company now" entry point (skips discovery/
+pre-screening, inserts the company straight at `RESEARCH_PENDING`). One schema addition
+(`opportunities.operatorVerdict`) makes the operator's own Approve/Reject verdict representable
+separately from the pipeline's own `status`. `next dev`/`next build` are pinned to `--webpack`
+(not Turbopack, the Next 16 default) since only webpack honors the `extensionAlias` config this
+project needs to let Next's bundler resolve the backend's NodeNext-style `.js`-suffixed imports.
+Verified via 31 new Vitest unit/fixture tests plus a 7-scenario Playwright suite
+(`e2e/dashboard.spec.ts`) run against a real `next dev --webpack` server and a seeded fixture DB
+(`scripts/seedE2eFixture.ts`) — see [phase-12-dashboard-mvp.md](phases/phase-12-dashboard-mvp.md)
+and new ADR-0019 for the ten judgment calls made (the tsconfig/bundler split, skipping
+`eslint-plugin-react` over an ESLint 10 peer-range gap, the `operatorVerdict` column, the
+activity-feed design, manual-research's discovery-skip + already-progressed handling, the spec
+§85 label-to-field mapping, the Sent-Manually/outcome-event split, filtering scope, the
+Playwright fixture-seeding approach, and the two features deliberately deferred). No real
+end-to-end operator walkthrough against live pipeline data was possible this phase — every real
+opportunity produced by Phases 3-11's live smoke tests was `VERIFIER_REJECTED`, so there has
+never been a real `VERIFIED`/`OUTREACH_READY` opportunity to view; PLAN.md's own "manual UX
+walkthrough... using data produced by earlier phases" acceptance criterion is deferred until one
+exists.
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

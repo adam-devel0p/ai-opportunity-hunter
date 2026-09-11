@@ -194,6 +194,15 @@ export const opportunities = sqliteTable("opportunities", {
     ],
   }).notNull(),
   operatorFeedback: text("operator_feedback"),
+  // Phase 12 (spec §45 Approve/Good Opportunity, Reject/Bad Opportunity): the operator's own
+  // verdict, independent of `status`'s automatic pipeline progression (VERIFIED/VERIFIER_REJECTED
+  // reflect what the *system* decided; this reflects what the *operator* decided, per spec §92's
+  // "sales outcomes should override Claude's subjective opinion"). See ADR-0019.
+  operatorVerdict: text("operator_verdict", {
+    enum: ["PENDING", "APPROVED", "REJECTED"],
+  })
+    .notNull()
+    .default("PENDING"),
   rejectionReason: text("rejection_reason", {
     enum: [
       "WEAK_EVIDENCE",

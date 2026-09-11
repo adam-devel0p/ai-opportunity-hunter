@@ -11,3 +11,7 @@ dist/
 coverage/
 *.log
 .DS_Store
+playwright-report/
+test-results/
+e2e/.tmp/
+*.tsbuildinfo

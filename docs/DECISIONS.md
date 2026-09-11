@@ -1151,6 +1151,143 @@ on the operator's own setup, and installing/loading a `launchd` job is itself th
 persistent, machine-wide side effect this project's own safety posture says should be a
 deliberate operator action, not something a phase's code does automatically.
 
+---
+
+## ADR-0019: Phase 12 (Dashboard MVP) judgment calls
+
+**Status:** Accepted (Phase 12).
+
+**Decision, part 1 — the tsconfig is split in two, and both `next dev`/`next build` are pinned to
+webpack via `--webpack`, not Turbopack:** `tsconfig.backend.json` (renamed from the pre-Phase-12
+`tsconfig.json`, `include` narrowed to exclude `src/app`) keeps every earlier phase's
+`moduleResolution: "NodeNext"` setup — which *requires* relative imports to spell the literal
+`.js` extension of their emitted file (e.g. `from "../db/schema.js"` for a `.ts` source), a
+convention all ~100 existing backend files already follow and this phase does not touch. A new
+root `tsconfig.json`, owned by Next (it auto-edits fields like `jsx` on every run), covers
+`src/app` with `moduleResolution: "bundler"`. The two can't be merged: Next's own bundler doesn't
+resolve a `.js`-suffixed specifier to a `.ts` file by default, so `src/app`'s server
+components/actions — which necessarily import shared modules like `src/lib/dashboardQueries.ts`
+that themselves import `../db/schema.js` — failed to build under Next's default bundler
+(confirmed empirically: `next build` with Turbopack, the Next 16 default, fails with "Module not
+found" on every such import). `experimental.extensionAlias` (`next.config.ts`) fixes this, but
+only for webpack — Turbopack doesn't read it as of Next 16.3.4 — so `dev`/`build`/`build:dashboard`
+all pass `--webpack` explicitly rather than relying on whatever the default happens to be. This is
+the smaller, safer change versus the alternative (dropping `.js` extensions repo-wide and
+switching backend module resolution away from NodeNext, which `tsx`/plain `node dist/worker.js`
+both still need for their own ESM resolution) — revisit if Turbopack later grows equivalent
+extension-alias support and the `--webpack` pin can be dropped.
+
+**Decision, part 2 — `eslint-plugin-react` is skipped; only `eslint-plugin-react-hooks` is
+added, scoped to `src/app/**`:** `eslint-plugin-react`'s latest release (7.37.5) declares a peer
+range of `eslint@^3 || ... || ^9.7`, not covering the `eslint@^10.10.0` this repo already pinned
+before Phase 12 — installing it produces an `ERESOLVE` conflict. `eslint-plugin-react-hooks`
+already supports `^10.0.0`. Given the dashboard is mostly server components (no client-side state,
+no custom hooks beyond what a handful of `"use client"` islands might someday need), the rules
+`eslint-plugin-react` would add on top (`jsx-uses-vars`, prop-types, etc.) matter far less than
+`rules-of-hooks`/`exhaustive-deps` — and React 19's automatic JSX runtime means there's no `import
+React` for `jsx-uses-vars`-style rules to even need. Revisit once `eslint-plugin-react` publishes
+a release with a wider peer range.
+
+**Decision, part 3 — `opportunities` gains a new `operatorVerdict` column
+(`PENDING | APPROVED | REJECTED`, default `PENDING`), separate from `status`:** Spec §45's
+"Approve / Good Opportunity" and "Reject / Bad Opportunity" are the *operator's* verdict, which
+spec §92 explicitly says should eventually override "Claude's subjective opinion about opportunity
+quality" — conflating it with `opportunities.status` (which tracks the *pipeline's* own automatic
+progression: `VERIFIED`/`VERIFIER_REJECTED` reflect what the Skeptical Verification Agent decided,
+not what the operator decided) would make it impossible to represent an operator overriding a
+`VERIFIED` opportunity as not worth pursuing, or approving one despite `VERIFIER_REJECTED`.
+`rejectionReason` (spec §46) already existed as an unused column reserved for exactly this
+dashboard phase; only `operatorVerdict` needed adding. `getSummaryMetrics`'s "opportunities
+rejected" count is `status === "VERIFIER_REJECTED" OR operatorVerdict === "REJECTED"` (either kind
+of rejection counts), while "strong opportunities" counts pipeline `status` alone (gate-passing is
+a pipeline fact, independent of the operator's own read on it).
+
+**Decision, part 4 — run history / the activity feed (spec §69) is derived from `work_items` at
+read time, not a new event-log table:** Adding a dedicated append-only events table would require
+every one of the eight existing pipeline handlers to also write to it — a whole-codebase change
+for a feature this phase can satisfy by reading data those handlers *already* persist.
+`src/lib/activity.ts`'s `getRecentActivity` queries completed/failed/deferred `work_items` rows
+(already timestamped by every handler) and, per task type, joins the entity `entityId` points at
+(company for `PRESCREEN`/`RESEARCH`/`ANALYZE`, opportunity for
+`VERIFY`/`BUILD_OFFER`/`FIND_CONTACT`/`WRITE_OUTREACH`, per DATABASE_SCHEMA.md's existing
+convention) to build a human-readable line. `DISCOVER` is the one type expanded into multiple feed
+entries (one per company whose `firstDiscoveredAt` falls inside that specific work item's
+start/completion window) to match spec §69's own example, which shows one line per discovered
+company rather than one line per campaign run. The tradeoff: this reports each stage's *current*
+state (e.g. a `PRESCREEN` entry shows the company's current `lifecycleStatus`), not a frozen
+historical snapshot — acceptable today because nothing yet re-runs an earlier stage for a company
+that has moved past it (same assumption ADR-0013 part 7 already documents for `ANALYZE`). Revisit
+if `REFRESH_EVIDENCE` (Phase 14) or spec §59's opportunity-dedup ever makes that assumption false.
+
+**Decision, part 5 — manual research entry (spec §72) skips discovery/pre-screening and inserts
+the company directly at `RESEARCH_PENDING`, and refuses to re-enqueue `RESEARCH` for a company
+already past that stage:** The operator naming a company directly is itself the vetting step
+discovery+pre-screening exist to approximate cheaply (spec §13), so repeating them would only
+spend extra Claude usage for no benefit — same reasoning `discoverHandler.ts` already uses to
+insert new companies straight at `PRESCREEN_PENDING` rather than `DISCOVERED`. For a domain that
+already exists, `requestManualResearch` deliberately does *not* force a company already past
+`RESEARCH_PENDING` back through `RESEARCH` — `researchHandler.ts` assumes (and
+`stateMachine.transitionCompanyLifecycle` enforces) that a `RESEARCH` item's target company is at
+`RESEARCH_PENDING`; re-enqueueing for e.g. a `RESEARCHED` company would just fail the task on an
+invalid transition. Re-research is spec §60/`REFRESH_EVIDENCE` territory, explicitly Phase 14
+scope (ADR-0018 part 8) — this action reports the company's current state (`"already-progressed"`)
+instead, so the operator can go look at its existing opportunity rather than silently no-op'ing or
+crashing a work item.
+
+**Decision, part 6 — spec §85's six trust labels are populated from existing fields, not a new
+agent output:** No agent from Phases 6-10 was asked for text specifically labeled "why Claude
+likes this" or "what to verify before contacting them" — adding that now would mean re-prompting
+every agent, out of scope for a phase PLAN.md scopes as UI-only. Instead: WHY CLAUDE LIKES THIS
+shows `economicImpact`/`problemDescription` plus the top-3 highest-scoring
+`opportunity_evaluations` components; WHY THE SKEPTIC MIGHT REJECT IT shows
+`verifierDealkillers`/`verifierWeaknesses`; WHAT WE KNOW/INFER/DON'T KNOW map onto the existing
+evidence classifications (`FACT`; `INFERENCE` ∪ `HYPOTHESIS`, since both are non-fact reasoning
+from the operator's trust perspective even though the evidence list itself keeps them visually
+distinct per spec §44; `UNKNOWN`); WHAT TO VERIFY combines `validationQuestion` with
+`verifierMissingInfo` (both are, definitionally, things nobody has confirmed yet). All of this
+already existed on the `opportunities`/`opportunity_evaluations` rows — this decision is purely
+about which existing field answers which trust question, not new persistence.
+
+**Decision, part 7 — "Sent Manually" and outcome-event recording are two separate write paths,
+and `SENT` can only ever be written by the former:** `markSentManually` is the one function that
+transitions `opportunities.status` (`OUTREACH_READY -> SENT`, the real spec §41/§90 transition)
+*and* inserts the `SENT` `outreach_outcomes` event, atomically from the caller's perspective —
+because a `SENT` event without the matching status transition (or vice versa) would leave the two
+tables disagreeing about whether the opportunity was actually sent. `recordOutreachOutcome`'s
+event type (`RecordableOutreachEvent`) is `outreach_outcomes.event` minus `"SENT"` specifically to
+make that split enforceable at the type level, not just by convention.
+
+**Decision, part 8 — filtering (spec §73) is scoped to what PLAN.md's Phase 12 explicitly lists
+as in-scope, not the full eventual filter set:** PLAN.md's Phase 12 section says "filtering/search
+polish beyond basics" is explicitly deferred. `listOpportunities`/`listCompanies` support
+status/verifier-result/min-score/industry/country/search and lifecycle-status/search respectively
+— plain GET-query-param forms needing no client JS. Campaign/date-range/reply-status filtering
+(also listed in spec §73) and any client-side polish (auto-submit on change, saved filter presets)
+are left for a later pass.
+
+**Decision, part 9 — Playwright's fixture DB is seeded with direct inserts
+(`scripts/seedE2eFixture.ts`), never by invoking the real `claude` CLI:** Same reasoning as every
+earlier phase's fixture-based agent tests (PLAN.md §13) — these tests exercise the dashboard UI
+(can the operator view evidence, click Approve, toggle autonomous mode, submit the manual-research
+form) rather than agent judgment quality, so there is nothing to gain and real subscription usage
+to lose by running the actual pipeline. The seed script inserts one full-pipeline scenario
+(company through an `OUTREACH_READY` opportunity with a `DRAFT` outreach draft) directly via
+Drizzle, mirroring the fixture-building style every `src/pipeline/*.test.ts` file already uses.
+Tests run `test.describe.serial` against one shared seeded DB (`playwright.config.ts`'s
+`webServer` re-seeds a fresh file on every `npm run test:e2e` invocation) rather than isolating
+each test's own DB, since Playwright's `webServer` starts exactly one `next dev` process per run —
+later tests are written to tolerate (and in one case, deliberately undo) earlier tests' mutations
+to the same seeded opportunity.
+
+**Decision, part 10 — no dashboard control was added for spec §8's high-risk gate override or
+`system_config`'s general key set (score threshold, pricing bands, country/industry allowlists,
+...):** ARCHITECTURE.md flagged the per-opportunity `allowHighRisk` override as "a later phase (the
+Phase 12 dashboard, most likely)" territory, but PLAN.md's actual Phase 12 "Build" list only
+specifies "autonomous mode + pause/resume toggle... writing to `system_config`" — a general config
+UI is explicitly named as Phase 14 scope ("a config UI beyond autonomous on/off"). Adding either
+now would be scope creep beyond what this phase's acceptance criteria ask for; both remain open
+items.
+
 **Consequences:** Phase 12 (dashboard) is where autonomous mode's pause/resume gets a real
 toggle UI (spec §71) instead of `scripts/autonomous.ts`, and where `src/lib/config.ts` most likely
 grows into the general settings accessor DATABASE_SCHEMA.md describes. The operator should run a

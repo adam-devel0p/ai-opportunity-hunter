@@ -1,0 +1,1 @@
+ALTER TABLE `opportunities` ADD `operator_verdict` text DEFAULT 'PENDING' NOT NULL;

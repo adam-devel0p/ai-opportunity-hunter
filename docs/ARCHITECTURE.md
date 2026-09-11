@@ -4,12 +4,12 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 11 (Autonomous scheduler/worker) — complete. See
-[phases/phase-11-autonomous-worker.md](phases/phase-11-autonomous-worker.md) for the full writeup.
+**Last updated:** Phase 12 (Dashboard MVP) — complete. See
+[phases/phase-12-dashboard-mvp.md](phases/phase-12-dashboard-mvp.md) for the full writeup.
 
 ## Status
 
-Phases 0-11 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-12 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
 normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
 primitives (priority selection, lifecycle transition validation, failure classification, crash
@@ -43,8 +43,14 @@ handler together into continuous operation (spec §50), with `system_config`-dri
 (spec §71, via a new minimal `src/lib/config.ts` and `scripts/autonomous.ts` CLI), quota-aware
 exponential backoff (spec §51, reusing every handler's existing `DEFERRED` convention), crash
 recovery wired to the live DB for the first time (Phase 2's `crashRecovery.ts`), and
-self-replenishing `DISCOVER` work via Phase 3's campaign selection. No dashboard yet — see
-PLAN.md Phase 12 onward.
+self-replenishing `DISCOVER` work via Phase 3's campaign selection. And now Phase 12's dashboard
+(`src/app`, a Next.js App Router app): the operator's first UI — summary metrics, an opportunity
+list + full detail page (evidence UX, the spec §85 human-trust panel, every spec §45 operator
+action), a spec §69 activity feed, the spec §71 autonomous pause/resume toggle, and spec §72's
+manual research entry point — built on new plain `src/lib` modules
+(`dashboardQueries.ts`/`dashboardActions.ts`/`activity.ts`) the Next.js server components/actions
+just wire up. See the dedicated section below. PLAN.md Phase 13 (feedback loop/outcome analytics)
+onward from here.
 
 ## Actual stack in use
 
@@ -65,8 +71,12 @@ PLAN.md Phase 12 onward.
   (ADR-0002). `better-sqlite3` ships prebuilt native binaries for common platforms
   (`prebuilds/`), so it loads without running its `node-gyp rebuild` install script — confirmed
   working in this environment, where install scripts are restricted by default.
-- Next.js dashboard: **not yet added** — deferred to Phase 12. Do not add this dependency
-  early.
+- Next.js ^16 (App Router) + React ^19 for the dashboard (Phase 12, PLAN.md §14/ADR-0003) —
+  server components read Drizzle directly, server actions write directly, no REST/tRPC layer.
+  `next dev`/`next build` are pinned to `--webpack` rather than Turbopack (the Next 16 default);
+  see "The dashboard (`src/app`, Phase 12)" below and ADR-0019 part 1 for why. `eslint-plugin-
+  react-hooks` (not full `eslint-plugin-react` — ADR-0019 part 2) lints `src/app/**`.
+  `@playwright/test` drives real-browser smoke tests (`e2e/`).
 
 ## Folder layout (as actually built)
 
@@ -253,6 +263,32 @@ src/
                                    `system_config` key DATABASE_SCHEMA.md eventually wants remains
                                    unwritten; Phase 14 owns the general config layer.
     config.test.ts
+    dashboardQueries.ts            Read-side queries for the Phase 12 dashboard (spec §42-44,
+                                    §73): `getSummaryMetrics`, `listOpportunities`,
+                                    `getOpportunityDetail`, `listCompanies`, `getCompanyDetail`,
+                                    `getCompanyByNormalizedDomain`. Plain functions over a `Db`,
+                                    aggregates computed in TypeScript over `.all()` rather than
+                                    SQL `COUNT`/`JOIN` (repo-scale justification in the module
+                                    docstring).
+    dashboardQueries.test.ts
+    dashboardActions.ts            Operator-action write paths for the Phase 12 dashboard (spec
+                                    §45-46, §72): `approveOpportunity`, `rejectOpportunity`,
+                                    `markDraftReviewed`, `markSentManually` (the one path that
+                                    drives the real `OUTREACH_READY -> SENT` transition, ADR-0019
+                                    part 7), `recordOutreachOutcome`, `requestManualResearch`
+                                    (skips discovery/pre-screening, inserts straight at
+                                    `RESEARCH_PENDING` — ADR-0019 part 5). `src/app/actions/*.ts`
+                                    are thin `"use server"` wrappers over these.
+    dashboardActions.test.ts
+    activity.ts                    `getRecentActivity` (spec §69, Phase 12) — derives a run-
+                                    history feed from `work_items` at read time rather than a new
+                                    event-log table (ADR-0019 part 4); expands a completed
+                                    `DISCOVER` item into one entry per company discovered in its
+                                    time window to match the spec's own example.
+    activity.test.ts
+    appDb.ts                       `getDb()` (Phase 12) — a `globalThis`-cached `Db` singleton
+                                    for the Next.js process, so dev-mode hot reloads don't leak
+                                    `better-sqlite3` connections.
   pipeline/
     stateMachine.ts              Lifecycle transition validators for all three §90-derived
                                   enums (company/opportunity/work-item), each its own table +
@@ -426,6 +462,34 @@ src/
                                    `runWorkerCycle`, `runWorker`, `main()`). The process entry
                                    point for `npm run worker`.
   worker.test.ts
+  app/                             The Next.js App Router dashboard (Phase 12) — see the
+                                   dedicated section below for the full breakdown. Server
+                                   components + `"use server"` actions; all logic they call lives
+                                   in `src/lib/dashboardQueries.ts`/`dashboardActions.ts`/
+                                   `activity.ts` above.
+    layout.tsx                     Root layout: nav bar, `globals.css` import.
+    page.tsx                       Dashboard home: summary metrics, autonomous mode toggle,
+                                   activity feed.
+    globals.css                    Hand-written stylesheet (light/dark via
+                                   `prefers-color-scheme`) — no UI framework dependency added.
+    format.ts                      Display-only formatting helpers (currency, dates) — not
+                                   shared with backend code.
+    opportunities/
+      page.tsx                     Opportunity list + basic filters/search (spec §73 basics).
+      [id]/page.tsx                 Full opportunity card, evidence UX, spec §85 trust panel,
+                                    operator-action forms (spec §45-46).
+    companies/
+      page.tsx                     Company list + search/lifecycle-status filter.
+      [id]/page.tsx                 Company detail — lifecycle status, notes, linked
+                                    opportunities.
+      new/page.tsx                  Manual research entry form (spec §72).
+    actions/
+      autonomous.ts                 `toggleAutonomousMode` — thin wrapper over
+                                    `src/lib/config.ts`.
+      opportunities.ts              Thin wrappers over `src/lib/dashboardActions.ts`'s
+                                    opportunity/outreach actions.
+      companies.ts                  Thin wrapper over `requestManualResearch`, redirects to the
+                                    new company's detail page.
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
@@ -475,6 +539,11 @@ scripts/
   autonomous.ts                  Toggles/reads `system_config`'s autonomous-mode flag (Phase 11,
                                  spec §71). `npm run autonomous -- --status | --enable |
                                  --disable`.
+  seedE2eFixture.ts              Seeds a deterministic full-pipeline fixture (company through an
+                                 `OUTREACH_READY` opportunity with a `DRAFT` outreach draft) into
+                                 `AOH_DB_PATH` via direct Drizzle inserts (Phase 12) — never
+                                 invokes the real `claude` CLI. Used exclusively by
+                                 `playwright.config.ts`'s `webServer`, not a production script.
   hooks/
     captureSourceHook.ts          The ADR-0004 `PostToolUse` hook subprocess entry point (Phase
                                   5) — spawned directly by the `claude` CLI (via `--settings`,
@@ -490,11 +559,20 @@ drizzle/
   0001_naive_mathemanic.sql     Phase 6: adds `opportunities.existing_alternatives` /
                                  `validation_question`. Committed — this is real schema history,
                                  not build output.
+  0002_marvelous_celestials.sql Phase 12: adds `opportunities.operator_verdict`.
 launchd/
   com.aiopportunityhunter.worker.plist.example  Example macOS launchd job for `src/worker.ts`
                                  (Phase 11, spec §11's "run while the laptop is awake"
                                  convenience) — placeholder absolute paths, not auto-installed
                                  (ADR-0018 part 10). Copy, edit, and `launchctl load` manually.
+e2e/
+  dashboard.spec.ts              Playwright smoke tests (Phase 12) — 7 scenarios run serially
+                                 against one seeded fixture DB (`playwright.config.ts`'s
+                                 `webServer` re-seeds a fresh file per run via
+                                 `scripts/seedE2eFixture.ts`): summary metrics + autonomous-mode
+                                 toggle, opportunity list navigation, the full evidence trail +
+                                 trust panel, Approve, Reject-with-reason, Draft Reviewed → Sent
+                                 Manually → outcome recording, and manual company entry.
 docs/
   phases/
     phase-0-foundations.md     Phase 0 completion doc.
@@ -509,12 +587,13 @@ docs/
     phase-9-contact-research-agent.md Phase 9 completion doc.
     phase-10-outreach-writer.md Phase 10 completion doc.
     phase-11-autonomous-worker.md Phase 11 completion doc.
+    phase-12-dashboard-mvp.md  Phase 12 completion doc.
 ```
 
-Nothing under `src/app` exists yet — that's Phase 12 (see PLAN.md's target layout for what's
-still to come). No dashboard exists yet, and Phase 10's Outreach Writer remains the last agent
-in the core pipeline (Phase 12 onward builds the dashboard and later the feedback loop, not new
-agents). Phase 2's `src/pipeline/` modules besides
+`src/app` now holds the Phase 12 dashboard (see the dedicated section below). Phase 10's Outreach
+Writer remains the last *agent* in the core pipeline — Phase 12 built the dashboard, not new
+agents, and Phase 13 (feedback loop/outcome analytics) onward doesn't add new agents either.
+Phase 2's `src/pipeline/` modules besides
 `campaignSelection.ts`/`discoverHandler.ts`/`prescreenHandler.ts`/`researchHandler.ts`/
 `analyzeHandler.ts`/`verifyHandler.ts`/`offerHandler.ts`/`contactHandler.ts`/`outreachHandler.ts`
 are still deterministic primitives only (pure functions over plain objects/arrays) — as of
@@ -700,6 +779,64 @@ design.
   item straight to `FAILED` with a clear `lastError`) rather than a real handler — Phase 14 scope,
   and nothing currently creates such an item, so this branch should be unreachable in practice
   (ADR-0018 part 8).
+
+## The dashboard (`src/app`, Phase 12)
+
+The operator's first UI (spec §42-46, §69, §71-73, §85; PLAN.md §14/ADR-0003) — a Next.js App
+Router app, one entry point into the same codebase as `src/worker.ts`, not a separate service.
+Server components read `src/lib/dashboardQueries.ts` directly; server actions (`"use server"`
+files under `src/app/actions/`) call `src/lib/dashboardActions.ts` directly. No REST/tRPC layer,
+no client-side data fetching — every page in this phase renders with zero client JavaScript,
+using plain `<form action={serverActionFunction}>` submissions (Next resolves the function
+reference to a POST under the hood) for every mutation, including the filter forms (`method="get"`,
+so filters are just query params a server component reads).
+
+- `getDb()` (`src/lib/appDb.ts`) is a `globalThis`-cached singleton so Next's dev-mode hot reloads
+  don't open a new `better-sqlite3` connection on every edit. `AOH_DB_PATH` (default
+  `./data/aoh.db`) is the same env var every other entry point already uses.
+- Pages: `/` (summary metrics, autonomous toggle, activity feed), `/opportunities` (list +
+  filters), `/opportunities/[id]` (full card, evidence UX, trust panel, every operator action),
+  `/companies` (list + search), `/companies/[id]` (detail — mainly a landing page for manual
+  research), `/companies/new` (spec §72's entry form). Every list/detail page sets
+  `export const dynamic = "force-dynamic"` — this is a single-operator app reading live pipeline
+  state, and there is no reason for Next to ever serve a stale cached render of it.
+- Spec §85's six trust labels (WHY CLAUDE LIKES THIS / WHY THE SKEPTIC MIGHT REJECT IT / WHAT WE
+  KNOW / WHAT WE INFER / WHAT WE DON'T KNOW / WHAT TO VERIFY) are populated from fields that
+  already existed on `opportunities`/`opportunity_evaluations` — no agent was re-prompted for
+  new "trust" text this phase. See ADR-0019 part 6 for the exact field-to-label mapping.
+- `opportunities.operatorVerdict` (`PENDING | APPROVED | REJECTED`, new this phase) is the
+  operator's own Approve/Reject verdict (spec §45), independent of the pipeline's own `status`
+  (`VERIFIED`/`VERIFIER_REJECTED` reflect what the Skeptical Verification Agent decided). See
+  ADR-0019 part 3.
+- `markSentManually` (`src/lib/dashboardActions.ts`) is the only code path that writes
+  `opportunities.status: "SENT"` — the real `OUTREACH_READY -> SENT` transition (spec §41/§90)
+  this project has been building toward since Phase 10 deliberately left it un-automated. It also
+  records the `SENT` `outreach_outcomes` event in the same call, so the two can't disagree.
+  `recordOutreachOutcome`'s event type excludes `"SENT"` at the type level to keep this split
+  enforced (ADR-0019 part 7).
+- The spec §69 activity feed (`src/lib/activity.ts`'s `getRecentActivity`) is derived from
+  `work_items` at read time — no new event-log table (ADR-0019 part 4). It reports each stage's
+  *current* entity state, not a historical snapshot; see that ADR for when this assumption would
+  need revisiting.
+- `requestManualResearch` (spec §72) skips discovery/pre-screening entirely for a manually-named
+  company — it inserts the company straight at `RESEARCH_PENDING` and enqueues a `RESEARCH` work
+  item directly, the same "insert at the right lifecycle stage" pattern `discoverHandler.ts` uses
+  for `PRESCREEN_PENDING`. For a domain that already exists past `RESEARCH_PENDING`, it reports
+  the company's current state instead of re-enqueueing (which would fail on an invalid lifecycle
+  transition) — see ADR-0019 part 5.
+- Build/dev tooling: `next dev`/`next build` are both pinned to `--webpack` (`package.json`), not
+  Turbopack (the Next 16 default) — only webpack honors the `experimental.extensionAlias`
+  (`next.config.ts`) this project needs so Next's bundler can resolve the backend's
+  NodeNext-style `.js`-suffixed relative imports (e.g. `from "../db/schema.js"`) to their `.ts`
+  sources. `tsconfig.json` (Next-owned, auto-edited by Next on every run) covers `src/app`;
+  `tsconfig.backend.json` (the pre-Phase-12 `tsconfig.json`, renamed) covers everything else. See
+  ADR-0019 part 1 for the full reasoning and what would let this be simplified later.
+- Playwright (`playwright.config.ts`, `e2e/dashboard.spec.ts`, `npm run test:e2e`): 7 scenarios
+  run serially (`test.describe.serial`) against one real `next dev --webpack` server and a fresh
+  fixture DB seeded by `scripts/seedE2eFixture.ts` (direct Drizzle inserts, never the real
+  `claude` CLI — ADR-0019 part 9). Covers every PLAN.md Phase 12 acceptance-criterion scenario:
+  viewing the full evidence trail, approve/reject with a reason, marking sent, toggling
+  autonomous mode, and manual company entry queuing a real (fixture-seeded) pipeline run.
 
 ## `src/config/models.ts`
 
@@ -909,3 +1046,22 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   run end-to-end as a real `launchctl` job in this phase (ADR-0018 part 10) — only `npm run
   worker` directly has been verified live. The operator should test the actual `launchctl load`
   path with their own filled-in paths before relying on it.
+- No dashboard control exists yet for spec §8's per-opportunity high-risk gate override (spec §32
+  gate config remains a global `gateConfig.allowHighRisk` code-level override, Phase 7) or for
+  `system_config`'s general key set beyond autonomous mode (score threshold, pricing bands,
+  country/industry allowlists, discovery volume, ...) — both still Phase 14 scope (ADR-0019
+  part 10).
+- Dashboard filtering (Phase 12) covers only spec §73's basics (status/verifier-result/min-score/
+  industry/country/search for opportunities; lifecycle-status/search for companies) via plain GET
+  query params — no date-range/campaign/reply-status filters, saved filters, or client-side
+  auto-submit polish yet (ADR-0019 part 8).
+- No real end-to-end dashboard walkthrough against live pipeline data has been performed —
+  Phases 7-10's live smoke tests left every real opportunity `VERIFIER_REJECTED`, so there has
+  never been a real `VERIFIED`/`OUTREACH_READY` opportunity to view in this dashboard. PLAN.md's
+  own Phase 12 acceptance criterion asking for exactly this walkthrough is deferred until a real
+  opportunity clears verification; the Playwright suite's seeded fixture is what was actually
+  exercised this phase.
+- `next dev`/`next build` are pinned to `--webpack` (Phase 12, ADR-0019 part 1) because only
+  webpack currently honors the `experimental.extensionAlias` config this project's shared
+  NodeNext-style `.js`-suffixed imports need — revisit if a future Next release adds equivalent
+  Turbopack support (Turbopack is the Next 16 default otherwise).

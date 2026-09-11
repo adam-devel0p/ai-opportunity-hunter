@@ -122,6 +122,7 @@ Spec §26, §58.
 | validationQuestion | text | nullable — proposed validation question (spec §26), added Phase 6 |
 | status | enum | `OPPORTUNITY_IDENTIFIED \| VERIFICATION_PENDING \| VERIFIER_REJECTED \| VERIFIED \| OFFER_READY \| CONTACT_RESEARCH \| OUTREACH_READY \| SENT` — the opportunity-level portion of spec §90's flow. Terminates at `SENT`; see below. |
 | operatorFeedback | text | nullable |
+| operatorVerdict | enum | `PENDING \| APPROVED \| REJECTED`, default `PENDING` — spec §45's Approve/Reject, independent of `status`'s automatic pipeline progression (added Phase 12, ADR-0019 part 3) |
 | rejectionReason | enum | nullable — `WEAK_EVIDENCE \| BAD_PROBLEM \| WOULDNT_BUY \| TOO_DIFFICULT \| TOO_SMALL \| TOO_LARGE \| ALREADY_SOLVED \| POOR_CONTACT \| BAD_PRICE \| REGULATORY_RISK \| GENERIC_IDEA \| NOT_INTERESTING \| OTHER` (spec §46, verbatim) |
 
 Facts/inferences/hypotheses/unknowns for an opportunity are **not** duplicated columns — they

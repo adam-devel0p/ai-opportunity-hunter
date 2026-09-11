@@ -15,6 +15,13 @@
       "when": 1789091653005,
       "tag": "0001_naive_mathemanic",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789125081399,
+      "tag": "0002_marvelous_celestials",
+      "breakpoints": true
     }
   ]
 }
