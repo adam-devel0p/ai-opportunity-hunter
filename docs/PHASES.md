@@ -14,7 +14,7 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 5 | Deep Research Agent + evidence model | ✅ | [phase-5-deep-research-agent.md](phases/phase-5-deep-research-agent.md) |
 | 6 | Opportunity Analysis Agent + scoring | ✅ | [phase-6-opportunity-analysis-agent.md](phases/phase-6-opportunity-analysis-agent.md) |
 | 7 | Skeptical Verification Agent + gating | ✅ | [phase-7-skeptic-verification-agent.md](phases/phase-7-skeptic-verification-agent.md) |
-| 8 | Offer Builder + pricing | ⬜ | — |
+| 8 | Offer Builder + pricing | ✅ | [phase-8-offer-builder.md](phases/phase-8-offer-builder.md) |
 | 9 | Contact Research Agent | ⬜ | — |
 | 10 | Outreach Writer | ⬜ | — |
 | 11 | Autonomous scheduler/worker | ⬜ | — |
@@ -22,8 +22,8 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 8 — Offer Builder + pricing
-**Next phase:** 9 — Contact Research Agent
+**Current phase:** 9 — Contact Research Agent
+**Next phase:** 10 — Outreach Writer
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -127,6 +127,29 @@ ADR-0014 for the judgment calls made (fresh-context input shape, gate independen
 collection, `VERIFIER_REJECTED` reused for every gate failure, deterministic risk
 classification and the same-sentence-proximity fix a live false positive required, gate-config
 defaults, and `BUILD_OFFER` enqueueing).
+
+Phase 8 added the sixth real agent: the Offer Builder (`src/agents/offerBuilderAgent.ts`,
+reasoning model tier, no tools) and the `BUILD_OFFER` work-item handler
+(`src/pipeline/offerHandler.ts`) — reachable only via a `BUILD_OFFER` work item, which
+`verifyHandler.ts` enqueues exclusively on a spec §32 gate pass, so every offer this handler
+builds is for an opportunity that already survived Skeptical Verification. Two new deterministic
+modules gate what gets persisted: `src/lib/offerLint.ts` (spec §34's vague-offer blocklist plus a
+minimum word-count floor — a match regenerates the offer once, a second match fails the task
+without persisting anything) and `src/lib/pricing.ts` (spec §35's configurable pricing bands —
+never blocks a deviant price, but always records a justification, the agent's own or a
+deterministic fallback, when the price falls outside the band its own duration estimate
+resolves to). On success, the opportunity collapses `VERIFIED -> OFFER_READY -> CONTACT_RESEARCH`
+in one write (same pattern as every earlier handler) and a `FIND_CONTACT` work item is enqueued
+for Phase 9. No live manual smoke test this phase — Phase 7's real veterinary-clinic run left all
+8 opportunities `VERIFIER_REJECTED`, so there was no live `VERIFIED` opportunity to build an offer
+for; PLAN.md's Phase 8 acceptance criteria only require fixture/unit tests, which this phase's 3
+new test files (`offerLint.test.ts`, `pricing.test.ts`, `offerBuilderAgent.test.ts`) plus
+`offerHandler.test.ts` cover directly. See
+[phase-8-offer-builder.md](phases/phase-8-offer-builder.md) and new ADR-0015 for the judgment
+calls made (pricing bands as a code-constant config with non-overlapping duration cutoffs, the
+`priceJustification` contract addition and its recording-not-blocking behavior, the vague-offer
+lint's blocklist + word-count design and its one-regeneration-then-fail behavior, the
+single-write status collapse + `FIND_CONTACT` enqueue, and the deferred live smoke test).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

@@ -4,13 +4,12 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 7 (Skeptical Verification Agent + strong-opportunity gating) — complete.
-See [phases/phase-7-skeptic-verification-agent.md](phases/phase-7-skeptic-verification-agent.md)
-for the full writeup.
+**Last updated:** Phase 8 (Offer Builder + pricing) — complete. See
+[phases/phase-8-offer-builder.md](phases/phase-8-offer-builder.md) for the full writeup.
 
 ## Status
 
-Phases 0-7 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-8 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
 normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
 primitives (priority selection, lifecycle transition validation, failure classification, crash
@@ -21,13 +20,16 @@ agent (the Deep Research Agent + the `RESEARCH` task handler, which persists pro
 evidence and enqueues `ANALYZE` work, plus the ADR-0004 `PostToolUse` evidence-provenance hook),
 Phase 6's fourth real agent (the Opportunity Analysis Agent + the `ANALYZE` task handler, which
 turns a company's evidence into a scored `opportunities`/`opportunity_evaluations` row — the
-first phase to wire `src/lib/scoring.ts` to real data), and now Phase 7's fifth real agent: the
+first phase to wire `src/lib/scoring.ts` to real data), Phase 7's fifth real agent (the
 Skeptical Verification Agent + the `VERIFY` task handler, which runs a fresh-context adversarial
-pass over a formed opportunity and combines it with a deterministic strong-opportunity gate
-(score threshold, evidence-strength floor, risk-category classification) to decide
-`VERIFIED` vs. `VERIFIER_REJECTED` — the first phase where an opportunity can actually be
-rejected, and the first to enqueue `BUILD_OFFER` work. No worker loop or dashboard yet, and no
-agent past Skeptical Verification — see PLAN.md Phase 8 onward.
+pass over a formed opportunity and combines it with a deterministic strong-opportunity gate —
+score threshold, evidence-strength floor, risk-category classification — to decide `VERIFIED` vs.
+`VERIFIER_REJECTED`, the first phase where an opportunity can actually be rejected, and the first
+to enqueue `BUILD_OFFER` work), and now Phase 8's sixth real agent: the Offer Builder + the
+`BUILD_OFFER` task handler, which turns a gated `VERIFIED` opportunity into a concrete, priced
+`offers` row — the first phase to enforce spec §34's vague-offer lint and spec §35's pricing
+bands, both deterministic. No worker loop or dashboard yet, and no agent past Offer Builder — see
+PLAN.md Phase 9 onward.
 
 ## Actual stack in use
 
@@ -104,6 +106,16 @@ src/
                                  for the Analysis Agent's `confidence`/`scoreComponents`/
                                  `penaltyReasons` (fresh-context enforcement, ADR-0014 part 1).
     skepticAgent.test.ts
+    offerBuilderAgent.ts        Offer Builder Agent (AGENT_CONTRACTS.md §6, Phase 8): Zod schema
+                                 (including the Phase-8-added nullable `priceJustification` field,
+                                 ADR-0015 part 2) + hand-mirrored JSON Schema, prompt builder
+                                 (embeds spec §34's bad/good scope examples and spec §36's
+                                 never-claim-a-demo-exists rule verbatim, takes a formatted
+                                 pricing-band guide as input), `runOfferBuilderAgent` (reasoning
+                                 model tier, no tools). Supports a `regenerationReason` input
+                                 distinct from the schema-validation retry, used by the handler's
+                                 vague-offer-lint regeneration (ADR-0015 part 3).
+    offerBuilderAgent.test.ts
     schemas/
       deepResearchSpike.ts    Draft Zod + JSON Schema pair for the spike script only —
                                superseded by deepResearchAgent.ts's real contract; kept only
@@ -160,6 +172,20 @@ src/
                                    collected, not just the first (ADR-0014 part 2). Pure, no DB,
                                    no Claude call — `verifyHandler.ts` is the only caller.
     opportunityGate.test.ts
+    pricing.ts                   `resolvePriceBand`/`evaluateOfferPricing`/
+                                  `formatPricingBandGuide` (spec §35, Phase 8) — deterministic
+                                  pricing-band resolution (duration-first, price as a fallback),
+                                  in-band checks for both the one-off price and the optional
+                                  recurring-support range. Pure, no DB, no Claude call — mirrors
+                                  `opportunityGate.ts`'s shape (config as an optional parameter,
+                                  code-constant default — ADR-0015 part 1).
+    pricing.test.ts
+    offerLint.ts                  `lintOfferScope` (spec §34, Phase 8) — deterministic vague-offer
+                                   detection: an exact-phrase blocklist (spec §34's own bad
+                                   example plus close variants) plus a minimum word-count floor.
+                                   `src/pipeline/offerHandler.ts` is the only caller (ADR-0015
+                                   part 3).
+    offerLint.test.ts
     campaigns.ts                 `discovery_campaigns` CRUD (Phase 3, spec §15): create/list/
                                   get, and operator status toggles (enable/pause/disable/
                                   blacklist — freely reversible, no state-machine restriction)
@@ -269,6 +295,27 @@ src/
                                     exhaustion/other failures handled the same way as every
                                     earlier handler.
     verifyHandler.test.ts
+    offerHandler.ts                 `runBuildOfferTask` (Phase 8) — the sixth live-DB-wired task
+                                     handler: loads the opportunity a `BUILD_OFFER` item targets
+                                     (`entityId` is an opportunity id, same convention as `VERIFY`
+                                     — set by `verifyHandler.ts`, which only enqueues this task
+                                     type on a gate pass, so this handler trusts that without
+                                     re-checking `opportunities.status`), its
+                                     `opportunity_evaluations` row, and the owning company, runs
+                                     the Offer Builder Agent, and runs two deterministic checks on
+                                     the result: `src/lib/offerLint.ts`'s vague-offer lint (a match
+                                     regenerates once, a second match fails the task without
+                                     persisting an offer) and `src/lib/pricing.ts`'s band
+                                     evaluation (never blocks; records a justification — the
+                                     agent's own or a deterministic fallback — whenever the price
+                                     falls outside its band). On success, persists one `offers`
+                                     row, collapses the opportunity
+                                     `VERIFIED -> OFFER_READY -> CONTACT_RESEARCH` in one write,
+                                     appends a summary to `companies.notes`, and enqueues a
+                                     `FIND_CONTACT` work item (Phase 9's agent). Quota
+                                     exhaustion/other failures handled the same way as every
+                                     earlier handler.
+    offerHandler.test.ts
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
@@ -294,6 +341,12 @@ scripts/
                                  (Phase 7's manual smoke-test entry point). `npm run verify --
                                  --opportunity <id>` for one, or `--all [--limit <n>]` for every
                                  PENDING VERIFY item.
+  offer.ts                       Runs real BUILD_OFFER work items against the live `claude` CLI
+                                 (Phase 8's manual smoke-test entry point). `npm run offer --
+                                 --opportunity <id>` for one, or `--all [--limit <n>]` for every
+                                 PENDING BUILD_OFFER item. Not yet exercised live this phase — see
+                                 ADR-0015 part 5 (no VERIFIED opportunity existed to run it
+                                 against; fixture tests cover the acceptance criteria instead).
   hooks/
     captureSourceHook.ts          The ADR-0004 `PostToolUse` hook subprocess entry point (Phase
                                   5) — spawned directly by the `claude` CLI (via `--settings`,
@@ -319,15 +372,16 @@ docs/
     phase-5-deep-research-agent.md Phase 5 completion doc.
     phase-6-opportunity-analysis-agent.md Phase 6 completion doc.
     phase-7-skeptic-verification-agent.md Phase 7 completion doc.
+    phase-8-offer-builder.md   Phase 8 completion doc.
 ```
 
 Nothing under `src/app` or `src/worker.ts` exists yet — those are Phase 11+ (see PLAN.md's
-target layout for what's still to come). No dashboard and no agent past Skeptical Verification
-exist yet. Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts`/
-`prescreenHandler.ts`/`researchHandler.ts`/`analyzeHandler.ts`/`verifyHandler.ts` are still
-deterministic primitives only (pure functions over plain objects/arrays), not wired to
+target layout for what's still to come). No dashboard and no agent past Offer Builder exist yet.
+Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts`/
+`prescreenHandler.ts`/`researchHandler.ts`/`analyzeHandler.ts`/`verifyHandler.ts`/`offerHandler.ts`
+are still deterministic primitives only (pure functions over plain objects/arrays), not wired to
 `work_items` reads/writes — that wiring happens incrementally as each later phase's agent handler
-is built (Phase 8 onward) and finally in Phase 11's `worker.ts` loop, which is also what will
+is built (Phase 9 onward) and finally in Phase 11's `worker.ts` loop, which is also what will
 actually run `campaignSelection.ts` autonomously instead of the operator picking a campaign by id
 via `scripts/discover.ts`.
 
@@ -533,9 +587,9 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   onward wires the rest incrementally; Phase 11's `worker.ts` is what runs `crashRecovery` at
   startup and drives the main loop instead of the operator invoking `scripts/discover.ts`/
   `scripts/prescreen.ts`/`scripts/research.ts`/`scripts/analyze.ts` by hand.
-- `BUILD_OFFER` work items now exist in the live DB (created by `verifyHandler.ts` on every gate
-  pass) but nothing consumes them yet — Phase 8's Offer Builder is the first handler that will
-  pick them up.
+- `FIND_CONTACT` work items now exist in the live DB (created by `offerHandler.ts` on every
+  successful offer) but nothing consumes them yet — Phase 9's Contact Research Agent is the first
+  handler that will pick them up.
 - `src/pipeline/failureClassification.ts`'s pattern lists (transient vs. permanent error text)
   are a reasoned starting point, not exhaustive — Phase 3's live discovery runs didn't exercise
   the failure path (both real runs succeeded), so these patterns are still unvalidated against
@@ -597,3 +651,16 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   explicitly reviewed by the operator") currently has no dashboard control — only a code-level
   `gateConfig.allowHighRisk` override, which is global, not per-opportunity. A later phase (the
   Phase 12 dashboard, most likely) should add a real per-opportunity override path.
+- `DEFAULT_PRICE_BANDS`' duration cutoffs (Phase 8, `src/lib/pricing.ts`) and
+  `MIN_SCOPE_WORD_COUNT` (`src/lib/offerLint.ts`) are reasoned starting points, not empirically
+  tuned — same category as every earlier phase's placeholder constants (ADR-0008/0009/0012/0014).
+  No live offer has been generated yet to validate them against (see below).
+- Phase 8's `scripts/offer.ts` has not been run against a real `VERIFIED` opportunity — Phase 7's
+  live smoke test left all 8 real veterinary-clinic opportunities `VERIFIER_REJECTED` (none
+  passed the gate), so there was nothing live to build an offer for. The next phase (or the
+  operator, ad hoc) that gets a fresh company through the pipeline to a real `VERIFIED`
+  opportunity should run `npm run offer -- --opportunity <id>` at least once and spot-check the
+  result, per this project's general "verify live behavior once real data exists" pattern.
+- `companies.notes` now carries a seventh kind of content (Phase 8's `"Offer: ..."` line, which
+  can itself embed a price-band-deviation justification in brackets) — same open item flagged
+  since ADR-0010 part 7.

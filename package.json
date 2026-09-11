@@ -19,7 +19,8 @@
     "prescreen": "tsx scripts/prescreen.ts",
     "research": "tsx scripts/research.ts",
     "analyze": "tsx scripts/analyze.ts",
-    "verify": "tsx scripts/verify.ts"
+    "verify": "tsx scripts/verify.ts",
+    "offer": "tsx scripts/offer.ts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

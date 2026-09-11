@@ -770,3 +770,89 @@ completion doc if real usage suggests they're off, same as ADR-0008/0009/0012's 
 placeholders.
 
 ---
+
+## ADR-0015: Phase 8 (Offer Builder + pricing) judgment calls
+
+**Status:** Accepted (Phase 8).
+
+**Decision, part 1 — pricing bands are a code-constant `src/lib/pricing.ts` config, not a
+`system_config` read, with non-overlapping duration cutoffs chosen to resolve spec §35's
+overlapping "approximately X" ranges:** PLAN.md's Phase 8 text says "configurable pricing bands
+(§35) in `system_config`," but no general `system_config` accessor layer exists yet — same
+category as ADR-0010 part 8 (discovery volume), ADR-0012 part 7 (freshness windows), and
+ADR-0014 part 5 (gate config): a reasoned-starting-point-as-a-function-parameter, not a new
+`system_config`-backed settings layer built for one phase's numbers alone.
+`DEFAULT_PRICE_BANDS` is a plain object every relevant function (`resolvePriceBand`,
+`evaluateOfferPricing`, `formatPricingBandGuide`) takes as an optional override parameter, same
+shape as `opportunityGate.ts`'s `gateConfig`. Spec §35's duration guidance overlaps in prose
+("Micro Fix: approximately several hours," "Small Automation: approximately half a day to one
+day") — translated here into non-overlapping cutoffs (MICRO_FIX ≤0.5 days, SMALL_AUTOMATION
+≤1 day, WORKFLOW_IMPLEMENTATION ≤3 days, LARGER_IMPLEMENTATION ≤7 days, clamped above that) so
+`resolvePriceBand` always returns exactly one band for any duration rather than needing a
+tie-breaking rule at read time.
+
+**Decision, part 2 — an out-of-band price is never blocked, but always gets a recorded
+justification; the Offer Builder Agent's contract gains a `priceJustification` field not in
+AGENT_CONTRACTS.md's original illustrative draft:** PLAN.md's Phase 8 acceptance criteria state
+"price falls within the configured band matching the opportunity's estimated duration, **or an
+explicit justification is recorded when it doesn't**" — recorded, not rejected. Since only Claude
+can meaningfully explain *why* a specific opportunity's price should deviate (unusually broad
+scope, unusual delivery risk, premium urgency), `offerBuilderOutputSchema` adds a nullable
+`priceJustification` field (same "extend the illustrative contract when the judgment genuinely
+belongs to Claude" pattern as ADR-0013 part 1's `scoreComponents`/`penaltyReasons` addition to the
+Opportunity Analysis Agent). `offerHandler.ts` computes the band deterministically and only reads
+this field when the price actually falls outside it; when the agent left it null anyway, the
+handler synthesizes a deterministic fallback note (`fallbackPriceJustification`) rather than
+silently persisting an unexplained deviation — the record always exists, whether or not the model
+supplied one. There is no dedicated `offers` schema column for this (same convention as
+ADR-0010 part 7 / ADR-0011 part 4 / ADR-0012 part 6): the justification is folded into the
+existing `companies.notes` audit-trail line for this offer, not a new migration for one phase's
+free text.
+
+**Decision, part 3 — the vague-offer lint (spec §34) is a blocklist of known-vague phrases plus a
+minimum word-count floor, and a match regenerates the offer exactly once before failing the
+task:** Spec §34 gives exactly one bad example ("AI automation services.") and one good example (a
+full descriptive sentence) with no further specification of what "vague" means generally.
+`src/lib/offerLint.ts`'s `lintOfferScope` combines an exact-phrase blocklist (the bad example plus
+close variants naming a technology/category instead of a deliverable) with a
+`MIN_SCOPE_WORD_COUNT` (8) floor, since a model could otherwise trivially dodge a fixed phrase
+list with an equally vague one-liner the list doesn't happen to contain. `offerHandler.ts` treats
+a lint failure as business-logic quality feedback, not a schema-validation failure — it calls
+`runOfferBuilderAgent` a second time with the lint's `reason` threaded through a new
+`regenerationReason` input (distinct from `runStructuredAgent`'s own internal
+schema-validation retry, which stays untouched), mirroring the "one retry" precedent used
+everywhere else in this app (AGENT_CONTRACTS.md's cross-cutting rule, `runStructuredAgent.ts`).
+A second consecutive lint failure fails the work item via `failureClassification.ts` — no offer is
+ever persisted for a scope that never became concrete — rather than looping indefinitely or
+silently accepting a vague offer on the second try.
+
+**Decision, part 4 — `BUILD_OFFER`'s handler collapses `VERIFIED -> OFFER_READY -> CONTACT_RESEARCH`
+into one write and enqueues `FIND_CONTACT`:** Same pattern as every prior phase's handler
+(`prescreenHandler.ts`'s `PRESCREENED -> RESEARCH_PENDING` collapse, ADR-0011 part 5;
+`analyzeHandler.ts`'s single-write `VERIFICATION_PENDING` persist, ADR-0013 part 3;
+`verifyHandler.ts`'s `BUILD_OFFER` enqueue on gate pass, ADR-0014 part 6) — there's no window
+where a durably-visible `OFFER_READY` row matters on its own since this handler both builds the
+offer and immediately queues the next stage in the same call. Both transition-table hops are
+still validated (an invalid move would still throw `InvalidTransitionError`), but only the final
+`CONTACT_RESEARCH` value is written. `FIND_CONTACT` is enqueued unconditionally on a successful
+offer, even though Phase 9's Contact Research Agent doesn't exist yet — "each handler wires the
+next stage's queue regardless of whether that stage's agent is built" (ADR-0012 part 5,
+ADR-0014 part 6).
+
+**Decision, part 5 — no live manual smoke test was run this phase:** PLAN.md's Phase 8 acceptance
+criteria list only fixture/unit tests, unlike Phases 0/3/5's explicit "run this against real
+companies" requirement. Phase 7's completion doc already recorded that all 8 real
+veterinary-clinic opportunities carried through from Phases 3-7 ended up `VERIFIER_REJECTED` (none
+passed the gate), so there is no live `VERIFIED` opportunity with a real `PENDING` `BUILD_OFFER`
+item to run `scripts/offer.ts` against without first re-running fresh discovery/research through
+the whole pipeline for a new company — out of scope for this phase's own acceptance criteria.
+`scripts/offer.ts` exists (same shape as `scripts/verify.ts`) and is ready for the next real
+`VERIFIED` opportunity, whenever one exists.
+
+**Consequences:** Phase 9 (Contact Research Agent) picks up `FIND_CONTACT` work items this phase
+enqueues, for opportunities now sitting at `CONTACT_RESEARCH` with a persisted `offers` row.
+`DEFAULT_PRICE_BANDS`' duration cutoffs and `MIN_SCOPE_WORD_COUNT` remain reasoned starting
+points, not empirically tuned — flag in a later phase's completion doc if real offers suggest
+they're off, same as every earlier phase's placeholder constants.
+
+---

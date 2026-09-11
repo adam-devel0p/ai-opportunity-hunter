@@ -164,8 +164,13 @@ VERIFIED` and enqueues `BUILD_OFFER`; any failure (not only an explicit skeptic 
 
 ## 6. Offer Builder (Phase 8)
 
-**Input:** opportunity + evaluation (only if `verifierResult === "KEEP"` and gating passed,
-spec §32).
+**Input** (as actually implemented, `src/agents/offerBuilderAgent.ts`): the opportunity's factual
+content (problem/solution/implementation/dependencies/risks/existing alternatives/estimated
+duration/Phase 6's suggested price range/recurring-revenue note/demo-concept note) plus its
+`opportunity_evaluations.adjustedScore`/`verifierConfidence` as context, and minimal company
+context — only reachable via a `BUILD_OFFER` work item, which `verifyHandler.ts` enqueues
+exclusively on a spec §32 gate pass, so this agent is never invoked for an opportunity that hasn't
+survived Skeptical Verification.
 
 **Output:**
 ```ts
@@ -174,16 +179,36 @@ z.object({
   expectedOutcome: z.string(),
   keyAssumptions: z.array(z.string()),
   durationEstimate: z.string(),
-  price: z.number(),
-  recurringPrice: z.number().nullable(),
+  // Whole currency units (matches the Opportunity Analysis Agent's convention, ADR-0013 part 5)
+  // — the handler converts to cents at persist time.
+  price: z.number().positive(),
+  recurringPrice: z.number().positive().nullable(), // null, never 0, when there is none
   exclusions: z.string(),
   validationNeeded: z.string(),
   demoConcept: z.string(),
   whyCommerciallyAttractive: z.string(),
+  // Not in this contract's original illustrative draft — added Phase 8 (ADR-0015 part 2) so an
+  // out-of-band price (per src/lib/pricing.ts) carries a real, model-supplied reason.
+  priceJustification: z.string().nullable(),
 })
 ```
-Post-generation deterministic lint: reject/regenerate if `scope` matches a vague-offer
-blocklist (e.g. bare "AI automation services") per spec §34's explicit bad example.
+
+**Post-generation deterministic checks (`src/pipeline/offerHandler.ts`):**
+- **Vague-offer lint** (`src/lib/offerLint.ts`, spec §34): `scope` is checked against a
+  known-vague-phrase blocklist (spec §34's own "AI automation services." bad example plus close
+  variants) and a minimum word-count floor. A match triggers exactly one regeneration (a second
+  Claude call with the lint's reason appended as feedback, distinct from
+  `runStructuredAgent`'s own schema-validation retry); a second consecutive match fails the work
+  item rather than persisting a vague offer (ADR-0015 part 3).
+- **Pricing band check** (`src/lib/pricing.ts`, spec §35): `price` is checked against the band
+  resolved from `estimatedDurationDays` (`MICRO_FIX | SMALL_AUTOMATION | WORKFLOW_IMPLEMENTATION |
+  LARGER_IMPLEMENTATION`, configurable, code-constant defaults — ADR-0015 part 1). Unlike the
+  vague-offer lint, this never blocks persistence — it only ensures a justification is always
+  recorded (the agent's own `priceJustification`, or a deterministic fallback note) whenever the
+  price falls outside its band (ADR-0015 part 2).
+
+On success, the opportunity collapses `VERIFIED -> OFFER_READY -> CONTACT_RESEARCH` in one write
+and a `FIND_CONTACT` work item is enqueued (Phase 9's agent, ADR-0015 part 4).
 
 ## 7. Contact Research Agent (Phase 9)
 
