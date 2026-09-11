@@ -212,8 +212,15 @@ and a `FIND_CONTACT` work item is enqueued (Phase 9's agent, ADR-0015 part 4).
 
 ## 7. Contact Research Agent (Phase 9)
 
-**Input:** company + opportunity's `affectedRole`. Only invoked after gating passes (spec
-§37 — never spend research budget on contacts for weak opportunities).
+**Input** (as actually implemented, `src/agents/contactAgent.ts`): the company's identity fields
+(`name`/`website`/`industry`/`country`/`sizeEstimate`) plus the opportunity's
+`problemTitle`/`problemDescription`/`affectedRole` — only reachable via a `FIND_CONTACT` work
+item, which `offerHandler.ts` enqueues unconditionally on every successful offer, so this agent is
+never invoked for an opportunity that hasn't already survived Skeptical Verification and gotten a
+concrete offer (spec §37 — "do not waste research capacity finding employees for businesses with
+no credible sales opportunity"). Uses the `"fast"` model tier (ADR-0016 part 1: bounded identity
+extraction via web tools, the same shape of task as Discovery, not open-ended reasoning) and
+`WebSearch`+`WebFetch` tools.
 
 **Output:**
 ```ts
@@ -227,6 +234,24 @@ z.object({
   emailConfidence: z.enum(["PUBLICLY_LISTED", "VERIFIED", "GUESSED", "UNKNOWN"]),
 })
 ```
+A `superRefine` structurally couples `email`/`emailConfidence` (ADR-0016 part 2): `email: null`
+requires `emailConfidence: "UNKNOWN"` and vice versa — a confidence label only means something
+when there's an actual email it describes. When no specific named individual can be found, the
+agent is instructed to return the correct role/title as `name` (e.g. `"Practice Manager"`) rather
+than inventing a person — a valid, expected outcome, not a failure (ADR-0016 part 3).
+
+**Post-generation enforcement (`src/lib/contactDisplay.ts`, spec §38's hard rule):**
+`toContactDisplay`/`getContactDisplay` are the one read path any later phase (Outreach Writer,
+the dashboard) should use instead of reading `contacts.emailConfidence` directly — `isVerifiedEmail`
+is only ever true when `emailConfidence === "VERIFIED"`, by construction, so there is no code path
+where a `GUESSED` row can be rendered as verified (ADR-0016 part 4). `isPreferredForInitialOutreach`
+gives the same treatment to spec §38's softer preference (true for `PUBLICLY_LISTED`/`VERIFIED`).
+
+Every completed `FIND_CONTACT` task forms exactly one `contacts` row regardless of the email
+confidence found (same "form the record, let a read path judge it" pattern as Opportunity
+Analysis, ADR-0013 part 2). On success, the opportunity transitions
+`CONTACT_RESEARCH -> OUTREACH_READY` and a `WRITE_OUTREACH` work item is enqueued (Phase 10's
+agent, ADR-0016 part 5).
 
 ## 8. Outreach Writer (Phase 10)
 

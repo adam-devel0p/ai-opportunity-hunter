@@ -15,15 +15,15 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 6 | Opportunity Analysis Agent + scoring | ✅ | [phase-6-opportunity-analysis-agent.md](phases/phase-6-opportunity-analysis-agent.md) |
 | 7 | Skeptical Verification Agent + gating | ✅ | [phase-7-skeptic-verification-agent.md](phases/phase-7-skeptic-verification-agent.md) |
 | 8 | Offer Builder + pricing | ✅ | [phase-8-offer-builder.md](phases/phase-8-offer-builder.md) |
-| 9 | Contact Research Agent | ⬜ | — |
+| 9 | Contact Research Agent | ✅ | [phase-9-contact-research-agent.md](phases/phase-9-contact-research-agent.md) |
 | 10 | Outreach Writer | ⬜ | — |
 | 11 | Autonomous scheduler/worker | ⬜ | — |
 | 12 | Dashboard MVP | ⬜ | — |
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 9 — Contact Research Agent
-**Next phase:** 10 — Outreach Writer
+**Current phase:** 10 — Outreach Writer
+**Next phase:** 11 — Autonomous scheduler/worker
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -150,6 +150,28 @@ calls made (pricing bands as a code-constant config with non-overlapping duratio
 `priceJustification` contract addition and its recording-not-blocking behavior, the vague-offer
 lint's blocklist + word-count design and its one-regeneration-then-fail behavior, the
 single-write status collapse + `FIND_CONTACT` enqueue, and the deferred live smoke test).
+
+Phase 9 added the seventh real agent: the Contact Research Agent (`src/agents/contactAgent.ts`,
+fast model tier, `WebSearch`+`WebFetch`) and the `FIND_CONTACT` work-item handler
+(`src/pipeline/contactHandler.ts`) — reachable only via a `FIND_CONTACT` work item, which
+`offerHandler.ts` enqueues unconditionally on every successful offer, so every contact this
+handler finds is for an opportunity that already survived Skeptical Verification and has a
+concrete priced offer. A new `src/lib/contactDisplay.ts` enforces spec §38's "never represent a
+guessed email as verified" hard rule at a dedicated data-access layer: `isVerifiedEmail` is only
+ever true when `emailConfidence === "VERIFIED"`, by construction. Every completed `FIND_CONTACT`
+task forms exactly one `contacts` row regardless of the email confidence found — including a
+correct-role-but-no-named-individual outcome, which the contract handles by returning the target
+role/title as `name` rather than inventing a person — and on success the opportunity collapses
+`CONTACT_RESEARCH -> OUTREACH_READY` in one write with a `WRITE_OUTREACH` work item enqueued for
+Phase 10. No live manual smoke test this phase — same blocker as Phase 8: all 8 real
+veterinary-clinic opportunities from Phases 3-7 remain `VERIFIER_REJECTED`, so there was no live
+`CONTACT_RESEARCH` opportunity to run `scripts/contact.ts` against; PLAN.md's Phase 9 acceptance
+criteria's fixture/unit tests (`contactAgent.test.ts`, `contactDisplay.test.ts`,
+`contactHandler.test.ts`) cover the acceptance criteria instead. See
+[phase-9-contact-research-agent.md](phases/phase-9-contact-research-agent.md) and new ADR-0016 for
+the judgment calls made (model tier/tools choice, the email/emailConfidence schema coupling, the
+no-named-individual-found design, `contactDisplay.ts` as the enforced data-access layer, the
+single-write status collapse + `WRITE_OUTREACH` enqueue, and the deferred live smoke test).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

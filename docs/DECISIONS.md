@@ -856,3 +856,89 @@ points, not empirically tuned — flag in a later phase's completion doc if real
 they're off, same as every earlier phase's placeholder constants.
 
 ---
+
+## ADR-0016: Phase 9 (Contact Research Agent) judgment calls
+
+**Status:** Accepted (Phase 9).
+
+**Decision, part 1 — Contact Research uses the `"fast"` model tier, with `WebSearch`+`WebFetch`
+tools:** Spec §52 doesn't name contact research explicitly, but groups "simple extraction" under
+the lower-cost/faster-model column and "complex opportunity reasoning" under the more-capable
+column. Finding a real, verifiable named individual (or, failing that, the correct role to target)
+is bounded identity extraction via web tools — the same shape of task as Discovery (find a real
+entity, never invent one; spec §14's integrity requirement echoed here for people instead of
+companies), not open-ended judgment over already-gathered evidence like Opportunity
+Analysis/Skeptical Verification/Offer Builder. `runContactAgent` therefore defaults to
+`resolveModelAlias("fast")` (currently `haiku`), same tier as Discovery/Pre-Screening, with both
+`WebSearch` (to find the person/profile at all) and `WebFetch` (to confirm what a found page
+actually says) — a superset of Pre-Screening's `WebFetch`-only tooling, since there is no single
+known page to check the way Pre-Screening already has a homepage URL from Discovery.
+
+**Decision, part 2 — the output schema structurally couples `email` and `emailConfidence`:**
+AGENT_CONTRACTS.md §7's illustrative draft left `email`/`emailConfidence` as independently
+nullable/enum fields with no stated relationship, but spec §38's four confidence states only make
+sense paired with an actual email value — `"UNKNOWN"` describes the absence of one, the other
+three describe some property *of* one. `contactOutputSchema`'s `superRefine`
+(`src/agents/contactAgent.ts`) rejects `email: null` paired with anything but `"UNKNOWN"`, and
+rejects a non-null `email` paired with `"UNKNOWN"` — a cheap, deterministic sanity check before
+persistence, same pattern as `opportunityAnalysisAgent.ts`'s `suggestedPriceMax >=
+suggestedPriceMin` check (ADR-0013 part 5) and `offerBuilderAgent.ts`'s
+zero-vs-null-`recurringPrice` check (ADR-0015, `offerBuilderOutputSchema`).
+
+**Decision, part 3 — when no specific named individual can be found, the agent returns the target
+role/title as `name` rather than a "not found" sentinel:** AGENT_CONTRACTS.md §7's `name` field is
+a required, non-nullable string, and PLAN.md's Phase 9 acceptance criteria only enumerate the four
+*email*-confidence states as scenarios to cover — there is no "no contact found" discriminator
+anywhere in the schema. Rather than add one for a case the contract doesn't model, the prompt
+(`CONTACT_INTEGRITY_RULES` in `contactAgent.ts`) instructs the agent that failing to find a named
+individual is a valid, expected outcome: return the correct role/title (from spec §37's preferred
+list, embedded verbatim in the prompt) as both `name` and `role`, explain why in `source`, and set
+`email`/`emailConfidence` to `null`/`"UNKNOWN"`. This keeps `contactHandler.ts` simple (it always
+persists exactly one `contacts` row on a successful Claude call, never branching on "was a person
+found") while staying honest — the row's own low-information content (identical `name`/`role`,
+`emailConfidence: "UNKNOWN"`) is itself the signal to a later dashboard that this needs operator
+attention, rather than a fabricated name filling the gap.
+
+**Decision, part 4 — spec §38's hard rule ("never represent a guessed email as verified") is
+enforced by a new `src/lib/contactDisplay.ts`, not left to a future dashboard's own discipline:**
+PLAN.md's Phase 9 acceptance criteria explicitly require this tested "at the data layer, not just
+by eyeballing a UI that doesn't exist yet." `toContactDisplay`/`getContactDisplay` compute
+`isVerifiedEmail` as literally `emailConfidence === "VERIFIED"` and `isPreferredForInitialOutreach`
+(spec §38's softer "should strongly prefer publicly listed or independently verified addresses")
+as `PUBLICLY_LISTED || VERIFIED` — pure, no live call site forcing a caller through it yet (same
+"implemented now, forward-looking" pattern as `riskCategory.ts` ahead of Phase 7's gate,
+ADR-0012 part 7's `sourceFreshness.ts`), except that `contactHandler.ts` already exercises it for
+real when composing its outcome, rather than reading `contacts.emailConfidence` inline. Any later
+read path (Phase 10's Outreach Writer, the Phase 12 dashboard) should build on this module instead
+of re-deriving the same check, so "never show GUESSED as VERIFIED" has exactly one implementation
+to get right.
+
+**Decision, part 5 — `FIND_CONTACT`'s handler transitions `CONTACT_RESEARCH -> OUTREACH_READY` in
+one write and enqueues `WRITE_OUTREACH`, unconditionally on every successful Claude call:** Same
+pattern as every prior phase's handler (`prescreenHandler.ts`'s single-write collapse, ADR-0011
+part 5; `offerHandler.ts`'s `VERIFIED -> OFFER_READY -> CONTACT_RESEARCH` collapse + `FIND_CONTACT`
+enqueue, ADR-0015 part 4) — deciding an opportunity's contact is too weak to outreach to (e.g. a
+persistent `UNKNOWN`/`GUESSED` result) is left to Phase 10 (which can read `emailConfidence`
+through `contactDisplay.ts`) or a later dashboard action, not this handler. `WRITE_OUTREACH` is
+enqueued even though Phase 10's Outreach Writer doesn't exist yet — "each handler wires the next
+stage's queue regardless of whether that stage's agent is built" (ADR-0012 part 5 and every
+handler since).
+
+**Decision, part 6 — no live manual smoke test this phase:** Same blocker as Phase 8 (ADR-0015
+part 5) — Phase 7's live smoke test left all 8 real veterinary-clinic opportunities
+`VERIFIER_REJECTED`, so no opportunity has ever reached `VERIFIED`/`OFFER_READY`/`CONTACT_RESEARCH`
+to run `scripts/contact.ts` against without first re-running fresh
+discovery/prescreen/research/analyze/verify/offer for a new company, which is out of this phase's
+own scope. PLAN.md's Phase 9 acceptance criteria do ask for a manual smoke test "against a few real
+gated opportunities from earlier phases" — none exist yet, so this is deferred, same as Phase 8,
+rather than manufactured by spending real Claude usage on a fresh pipeline run outside this
+phase's stated scope.
+
+**Consequences:** Phase 10 (Outreach Writer) reads `contacts` rows this phase produces — through
+`contactDisplay.ts`, not the raw table — and picks up `WRITE_OUTREACH` work items this phase
+enqueues. Whichever session first gets a real company through the whole pipeline to a live
+`OUTREACH_READY` opportunity should run `npm run contact -- --opportunity <id>` (and, once it
+exists, the Phase 10 equivalent) at least once and spot-check the result, same "verify live
+behavior once real data exists" pattern flagged since ADR-0015 part 5.
+
+---

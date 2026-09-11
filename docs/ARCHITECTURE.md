@@ -4,12 +4,13 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 8 (Offer Builder + pricing) — complete. See
-[phases/phase-8-offer-builder.md](phases/phase-8-offer-builder.md) for the full writeup.
+**Last updated:** Phase 9 (Contact Research Agent) — complete. See
+[phases/phase-9-contact-research-agent.md](phases/phase-9-contact-research-agent.md) for the full
+writeup.
 
 ## Status
 
-Phases 0-8 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-9 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
 normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
 primitives (priority selection, lifecycle transition validation, failure classification, crash
@@ -25,11 +26,15 @@ Skeptical Verification Agent + the `VERIFY` task handler, which runs a fresh-con
 pass over a formed opportunity and combines it with a deterministic strong-opportunity gate —
 score threshold, evidence-strength floor, risk-category classification — to decide `VERIFIED` vs.
 `VERIFIER_REJECTED`, the first phase where an opportunity can actually be rejected, and the first
-to enqueue `BUILD_OFFER` work), and now Phase 8's sixth real agent: the Offer Builder + the
-`BUILD_OFFER` task handler, which turns a gated `VERIFIED` opportunity into a concrete, priced
-`offers` row — the first phase to enforce spec §34's vague-offer lint and spec §35's pricing
-bands, both deterministic. No worker loop or dashboard yet, and no agent past Offer Builder — see
-PLAN.md Phase 9 onward.
+to enqueue `BUILD_OFFER` work), Phase 8's sixth real agent (the Offer Builder + the `BUILD_OFFER`
+task handler, which turns a gated `VERIFIED` opportunity into a concrete, priced `offers` row —
+the first phase to enforce spec §34's vague-offer lint and spec §35's pricing bands, both
+deterministic), and now Phase 9's seventh real agent: the Contact Research Agent + the
+`FIND_CONTACT` task handler, which finds the real person most likely to own a gated opportunity's
+problem and persists a `contacts` row — the first phase to enforce spec §38's "never represent a
+guessed email as verified" hard rule at a dedicated data-access layer
+(`src/lib/contactDisplay.ts`) rather than trusting a future dashboard to check it correctly. No
+worker loop or dashboard yet, and no agent past Contact Research — see PLAN.md Phase 10 onward.
 
 ## Actual stack in use
 
@@ -116,6 +121,14 @@ src/
                                  distinct from the schema-validation retry, used by the handler's
                                  vague-offer-lint regeneration (ADR-0015 part 3).
     offerBuilderAgent.test.ts
+    contactAgent.ts             Contact Research Agent (AGENT_CONTRACTS.md §7, Phase 9): Zod
+                                 schema (`contactOutputSchema`, with a `superRefine` structurally
+                                 coupling `email`/`emailConfidence`, ADR-0016 part 2) + hand-mirrored
+                                 JSON Schema, prompt builder (embeds spec §37's preferred-contact-
+                                 roles list and never-invent-a-person/email integrity rules
+                                 verbatim), `runContactAgent` (fast model tier, WebSearch+WebFetch
+                                 tools — ADR-0016 part 1).
+    contactAgent.test.ts
     schemas/
       deepResearchSpike.ts    Draft Zod + JSON Schema pair for the spike script only —
                                superseded by deepResearchAgent.ts's real contract; kept only
@@ -186,6 +199,17 @@ src/
                                    `src/pipeline/offerHandler.ts` is the only caller (ADR-0015
                                    part 3).
     offerLint.test.ts
+    contactDisplay.ts             `toContactDisplay`/`getContactDisplay` (spec §38, Phase 9) — the
+                                   data-access-layer enforcement of "never represent a guessed
+                                   email as verified": `isVerifiedEmail` is only ever true when
+                                   `emailConfidence === "VERIFIED"`, by construction (ADR-0016
+                                   part 4). `isPreferredForInitialOutreach` gives the same
+                                   treatment to spec §38's softer "prefer publicly listed or
+                                   verified addresses" preference. `contactHandler.ts` already
+                                   exercises this for real; any later read path (Outreach Writer,
+                                   the dashboard) should build on it instead of re-deriving the
+                                   check.
+    contactDisplay.test.ts
     campaigns.ts                 `discovery_campaigns` CRUD (Phase 3, spec §15): create/list/
                                   get, and operator status toggles (enable/pause/disable/
                                   blacklist — freely reversible, no state-machine restriction)
@@ -316,6 +340,28 @@ src/
                                      exhaustion/other failures handled the same way as every
                                      earlier handler.
     offerHandler.test.ts
+    contactHandler.ts               `runFindContactTask` (Phase 9) — the seventh live-DB-wired
+                                     task handler: loads the opportunity a `FIND_CONTACT` item
+                                     targets (`entityId` is an opportunity id, same convention as
+                                     `VERIFY`/`BUILD_OFFER` — set by `offerHandler.ts`, which
+                                     enqueues this task type unconditionally on every successful
+                                     offer, so this handler trusts that without re-checking
+                                     `opportunities.status`) and the owning company, runs the
+                                     Contact Research Agent with the opportunity's
+                                     `problemTitle`/`problemDescription`/`affectedRole` as
+                                     targeting context, and persists exactly one `contacts` row
+                                     regardless of the email confidence found (ADR-0016 part 3/5
+                                     — same "form the record, let a read path judge it" pattern as
+                                     `analyzeHandler.ts`). Computes its outcome's
+                                     `isVerifiedEmail`/`isPreferredForInitialOutreach` via
+                                     `src/lib/contactDisplay.ts` rather than reading
+                                     `emailConfidence` inline. On success, collapses the
+                                     opportunity `CONTACT_RESEARCH -> OUTREACH_READY` in one write,
+                                     appends a summary to `companies.notes`, and enqueues a
+                                     `WRITE_OUTREACH` work item (Phase 10's agent). Quota
+                                     exhaustion/other failures handled the same way as every
+                                     earlier handler.
+    contactHandler.test.ts
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
@@ -347,6 +393,13 @@ scripts/
                                  PENDING BUILD_OFFER item. Not yet exercised live this phase — see
                                  ADR-0015 part 5 (no VERIFIED opportunity existed to run it
                                  against; fixture tests cover the acceptance criteria instead).
+  contact.ts                     Runs real FIND_CONTACT work items against the live `claude` CLI
+                                 (Phase 9's manual smoke-test entry point). `npm run contact --
+                                 --opportunity <id>` for one, or `--all [--limit <n>]` for every
+                                 PENDING FIND_CONTACT item. Not yet exercised live this phase — see
+                                 ADR-0016 part 6 (same blocker as ADR-0015 part 5: no VERIFIED
+                                 opportunity has ever existed to carry through to CONTACT_RESEARCH;
+                                 fixture tests cover the acceptance criteria instead).
   hooks/
     captureSourceHook.ts          The ADR-0004 `PostToolUse` hook subprocess entry point (Phase
                                   5) — spawned directly by the `claude` CLI (via `--settings`,
@@ -373,17 +426,18 @@ docs/
     phase-6-opportunity-analysis-agent.md Phase 6 completion doc.
     phase-7-skeptic-verification-agent.md Phase 7 completion doc.
     phase-8-offer-builder.md   Phase 8 completion doc.
+    phase-9-contact-research-agent.md Phase 9 completion doc.
 ```
 
 Nothing under `src/app` or `src/worker.ts` exists yet — those are Phase 11+ (see PLAN.md's
-target layout for what's still to come). No dashboard and no agent past Offer Builder exist yet.
-Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts`/
-`prescreenHandler.ts`/`researchHandler.ts`/`analyzeHandler.ts`/`verifyHandler.ts`/`offerHandler.ts`
-are still deterministic primitives only (pure functions over plain objects/arrays), not wired to
-`work_items` reads/writes — that wiring happens incrementally as each later phase's agent handler
-is built (Phase 9 onward) and finally in Phase 11's `worker.ts` loop, which is also what will
-actually run `campaignSelection.ts` autonomously instead of the operator picking a campaign by id
-via `scripts/discover.ts`.
+target layout for what's still to come). No dashboard and no agent past Contact Research exist
+yet. Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts`/
+`prescreenHandler.ts`/`researchHandler.ts`/`analyzeHandler.ts`/`verifyHandler.ts`/`offerHandler.ts`/
+`contactHandler.ts` are still deterministic primitives only (pure functions over plain
+objects/arrays), not wired to `work_items` reads/writes — that wiring happens incrementally as
+each later phase's agent handler is built (Phase 10 onward) and finally in Phase 11's `worker.ts`
+loop, which is also what will actually run `campaignSelection.ts` autonomously instead of the
+operator picking a campaign by id via `scripts/discover.ts`.
 
 ## `src/agents/claudeClient.ts`
 
@@ -664,3 +718,16 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
 - `companies.notes` now carries a seventh kind of content (Phase 8's `"Offer: ..."` line, which
   can itself embed a price-band-deviation justification in brackets) — same open item flagged
   since ADR-0010 part 7.
+- Phase 9's `scripts/contact.ts` has not been run against the real `claude` CLI either — same
+  blocker as Phase 8 (ADR-0016 part 6): no opportunity has ever reached `VERIFIED`/`OFFER_READY`/
+  `CONTACT_RESEARCH` in the live DB, so there is nothing real to find a contact for yet. Whichever
+  session first carries a fresh company all the way through the pipeline should run
+  `npm run contact -- --opportunity <id>` and spot-check the result (is the contact genuinely
+  plausible, is the email-confidence label honest) before trusting this phase's prompt design.
+- `companies.notes` now carries an eighth kind of content (Phase 9's `"Contact: ..."` line) — same
+  open item flagged since ADR-0010 part 7.
+- `src/lib/contactDisplay.ts`'s `getContactDisplay` has no live caller yet beyond its own tests —
+  `contactHandler.ts` uses the pure `toContactDisplay` directly on the row it just inserted, since
+  it already has that row in hand; `getContactDisplay`'s DB-read form is forward-looking, for
+  whichever later phase (Outreach Writer, the dashboard) first needs to look up a contact's
+  display-safe representation by id alone.
