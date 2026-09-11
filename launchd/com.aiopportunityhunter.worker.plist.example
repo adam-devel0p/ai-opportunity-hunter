@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example macOS launchd job for src/worker.ts (PLAN.md Phase 11, spec §11's "run while the
+  laptop is awake" convenience). This is NOT a hard dependency — `npm run worker` in a plain
+  terminal (or tmux/screen) works exactly the same way. Use this only if you want the worker to
+  start automatically when you log in and be relaunched if it exits.
+
+  Setup:
+    1. Copy this file, drop the .example suffix, and replace every /ABSOLUTE/PATH/TO placeholder
+       below with the real absolute path to this repo and to your `node`/`tsx` binaries
+       (`which node`, and node_modules/.bin/tsx inside this repo).
+    2. Copy it into ~/Library/LaunchAgents/com.aiopportunityhunter.worker.plist
+    3. Load it:   launchctl load ~/Library/LaunchAgents/com.aiopportunityhunter.worker.plist
+    4. Unload it: launchctl unload ~/Library/LaunchAgents/com.aiopportunityhunter.worker.plist
+
+  This does NOT enable autonomous mode by itself — the worker starts paused until you run
+  `npm run autonomous -- --enable` (spec §71). KeepAlive is intentionally NOT set to true: a
+  worker that crashes repeatedly should surface as a stopped launchd job the operator notices,
+  not restart in a loop that could mask a real problem.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiopportunityhunter.worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/ABSOLUTE/PATH/TO/node</string>
+        <string>/ABSOLUTE/PATH/TO/ai-opportunity-hunter/node_modules/.bin/tsx</string>
+        <string>/ABSOLUTE/PATH/TO/ai-opportunity-hunter/src/worker.ts</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/ABSOLUTE/PATH/TO/ai-opportunity-hunter</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AOH_DB_PATH</key>
+        <string>/ABSOLUTE/PATH/TO/ai-opportunity-hunter/data/aoh.db</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/ABSOLUTE/PATH/TO/DIR/CONTAINING/claude</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/ABSOLUTE/PATH/TO/ai-opportunity-hunter/data/worker.log</string>
+    <key>StandardErrorPath</key>
+    <string>/ABSOLUTE/PATH/TO/ai-opportunity-hunter/data/worker.err.log</string>
+</dict>
+</plist>

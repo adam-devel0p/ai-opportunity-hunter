@@ -1036,3 +1036,126 @@ live evidence-quality check validated Deep Research — same "verify live behavi
 exists" pattern flagged since ADR-0015 part 5.
 
 ---
+
+## ADR-0018: Phase 11 (Autonomous scheduler/worker) judgment calls
+
+**Status:** Accepted (Phase 11).
+
+**Decision, part 1 — `DEFERRED` is reused, unchanged, as the worker-level "quota exhausted"
+signal; no new field is added to any handler's outcome type:** Every handler since Phase 3
+already transitions its work item to `DEFERRED` for exactly one reason — a `quota_exhausted`
+result from `claudeClient` (ADR-0010 part 5, reused verbatim in every later phase's ADR) — and
+never for anything else. `src/worker.ts`'s `runWorkerCycle` relies on this existing convention
+directly (`quotaExhausted: outcome.workItemStatus === "DEFERRED"`) rather than asking all eight
+handlers to also return an explicit `quotaExhausted` boolean. This is a deliberate reuse of an
+established invariant, not a coincidence — if a future phase ever introduces a handler that sets
+`DEFERRED` for a different reason, this detection breaks silently, so that invariant is now
+load-bearing and should be called out in that phase's own ADR if it changes.
+
+**Decision, part 2 — quota backoff lives in the worker process's own in-memory state, not on the
+`work_item` row:** ADR-0010 part 5 deliberately left a `DEFERRED` item's `runAfter` null, "since
+no scheduler exists yet to interpret it — Phase 11's worker loop owns deciding when a
+quota-deferred item should actually resume." `runWorker` owns this now: a consecutive-exhaustion
+counter (reset by any non-quota-exhausted cycle) drives an exponential backoff
+(`DEFAULT_QUOTA_BACKOFF_BASE_MS` = 30 min, doubling, capped at `DEFAULT_QUOTA_BACKOFF_MAX_MS` =
+4h — spec §51's "start at e.g. 30 min, capped"), and the loop simply doesn't run another cycle
+until that backoff elapses. The `DEFERRED` item itself stays immediately "eligible" by
+`priority.ts`'s own rules the whole time; what actually prevents hammering Claude is that nothing
+calls `runWorkerCycle` again until the sleep resolves. This keeps the per-item state machine and
+`isEligibleNow` untouched from Phase 2 and puts the actual scheduling policy where PLAN.md §12
+always said it belonged — the worker loop, not the queue.
+
+**Decision, part 3 — every handler dispatch is wrapped in try/catch inside `runWorkerCycle`, not
+inside each handler:** PLAN.md's architecture section 8 states "each task handler is wrapped so
+one failure never takes down the loop (§66)," but no prior phase had a real loop to do the
+wrapping — each handler already returns a typed failure outcome for a `claudeClient`-reported
+failure, but several (e.g. `discoverHandler.ts` on an unknown campaign id) still `throw` a plain
+`Error` for a referential-integrity problem, which would otherwise crash an actual long-running
+process. `runWorkerCycle` catches any such throw and routes it through the exact same
+`resolveFailureOutcome` classification (attempts/backoff/RETRYABLE-vs-FAILED) a handler-reported
+failure gets, persisting the same shape of `work_items` update either way. This is the first
+phase where that PLAN.md sentence is literally true rather than aspirational.
+
+**Decision, part 4 — a minimal `src/lib/config.ts` is added now, scoped to exactly the two keys
+this phase needs, not a general `system_config` settings layer:** Same "reasoned starting point,
+not the general accessor DATABASE_SCHEMA.md eventually wants" posture as ADR-0010 part 8/ADR-0012
+part 7/ADR-0014 part 5/ADR-0015 part 1 — but unlike those, PLAN.md's Phase 11 acceptance criteria
+explicitly require "`system_config`-driven pause/resume checked every cycle," so this phase does
+add the smallest accessor that satisfies it: `getAutonomousMode`/`setAutonomousMode` (spec §71)
+and `getCampaignSelectionState`/`setCampaignSelectionState` (the SWRR round-robin weights,
+persisted so campaign diversity holds across worker restarts, not just within one process's
+lifetime — the forward pointer left in ADR-0010 part 2). Every other `system_config` key
+DATABASE_SCHEMA.md lists (score threshold, pricing bands, country/industry allowlists, ...)
+remains unwritten; Phase 14 owns the general config UI.
+
+**Decision, part 5 — autonomous mode defaults to `false` (paused) when the `system_config` row
+doesn't exist yet:** A fresh checkout/fresh DB must never start spending Claude usage
+autonomously without the operator explicitly opting in — same "never the default" posture
+ADR-0001 takes toward paid API fallback. The operator must run
+`npm run autonomous -- --enable` at least once before the worker does anything beyond log
+`paused` every idle cycle.
+
+**Decision, part 6 — the worker itself creates `DISCOVER` work items (spec §16), capped at one
+in flight at a time, since nothing upstream of Discovery ever enqueues it automatically:** Every
+other task type is created by the handler that finishes the stage before it (`discoverHandler.ts`
+enqueues `PRESCREEN`, `prescreenHandler.ts` enqueues `RESEARCH`, and so on) — Discovery has no
+upstream stage, so without new wiring the queue would run dry the moment the operator's earlier
+manual `scripts/discover.ts` runs finished. `ensureDiscoveryWork` (called at the top of every
+cycle, before selecting the next item, and skipped while paused) checks for any `DISCOVER` item
+not already in a terminal status and, if none exists, picks the next campaign via the Phase 3
+`selectNextCampaign` SWRR algorithm and enqueues one. Capped at one in flight rather than keeping
+several queued: spec §49 already ranks `DISCOVER` lowest of all nine task types, so piling up
+several would only ever matter once the queue is otherwise completely empty anyway, and one
+in-flight item is simpler to reason about than a target queue depth.
+
+**Decision, part 7 — `RunResearchTaskOptions`'s required `dbPath` is threaded through the generic
+`TaskHandler` type as a fourth parameter every handler receives but only `RESEARCH`'s wrapper
+uses:** `researchHandler.ts` (Phase 5) needs the live DB file path so the ADR-0004 hook subprocess
+can open its own connection — the one handler whose options shape doesn't exactly match the other
+seven's `{db, workItem, now}`. Rather than special-casing `RESEARCH` in the dispatch logic (an
+`if (taskType === "RESEARCH")` branch bypassing the shared `TaskHandler` map), `TaskHandler`'s
+type signature gains a `dbPath: string` fourth parameter that every entry in `TASK_HANDLERS`
+structurally satisfies (TypeScript permits a function with fewer declared parameters to satisfy a
+wider function type — the other seven handlers' closures simply don't mention it), keeping the
+dispatch itself uniform.
+
+**Decision, part 8 — `REFRESH_EVIDENCE` items fail deterministically rather than crashing the
+loop, since no handler exists yet and nothing currently creates one:** `work_items.taskType`'s
+enum includes `REFRESH_EVIDENCE` since Phase 1, but it's explicitly Phase 14 scope (spec §60
+re-research) and no code path anywhere creates one — `TASK_HANDLERS` needs an exhaustive entry
+for TypeScript's `Record<TaskType, TaskHandler>` regardless, so this branch should be unreachable
+in live operation. It transitions the item straight to `FAILED` with a clear `lastError` instead
+of throwing, consistent with part 3's "one failure never takes down the loop" — if this ever does
+fire, it's a visible, debuggable signal that something upstream started creating
+`REFRESH_EVIDENCE` items before Phase 14 built the handler for them, not a process crash.
+
+**Decision, part 9 — no live multi-hour autonomous run was performed this phase; a zero-cost
+paused-mode smoke test was run instead against the real project DB:** PLAN.md's Phase 11
+acceptance criteria ask for "operator starts the worker for a real multi-hour stretch" — genuinely
+running autonomous mode for hours would spend real Claude subscription usage against the
+project's actual campaigns/companies without the operator having asked for that run in this
+session, so it's left for the operator to do deliberately (documented here as an open item, same
+category as Phases 8-10's deferred live smoke tests). What *was* verified live: `npm run worker`
+against the real `./data/aoh.db` starts, correctly reports `paused` every idle cycle (autonomous
+mode is off by default per part 5), and shuts down cleanly on `SIGINT` — proving the process
+wiring itself works end-to-end without spending any usage. The integration tests in
+`src/worker.test.ts` (mocked `claudeClient`, real handlers, real temp DB) cover the acceptance
+criteria's quota-exhaustion-backoff-then-resume and crash-recovery-then-continue scenarios that
+don't require spending real Claude usage to verify.
+
+**Decision, part 10 — an example `launchd` plist is provided as a `.example` file the operator
+must copy and edit, not auto-installed:** `launchd/com.aiopportunityhunter.worker.plist.example`
+has placeholder absolute paths (`/ABSOLUTE/PATH/TO/...`) the operator must fill in for their own
+machine — a plist with real paths hardcoded for this development machine would be actively wrong
+on the operator's own setup, and installing/loading a `launchd` job is itself the kind of
+persistent, machine-wide side effect this project's own safety posture says should be a
+deliberate operator action, not something a phase's code does automatically.
+
+**Consequences:** Phase 12 (dashboard) is where autonomous mode's pause/resume gets a real
+toggle UI (spec §71) instead of `scripts/autonomous.ts`, and where `src/lib/config.ts` most likely
+grows into the general settings accessor DATABASE_SCHEMA.md describes. The operator should run a
+real multi-hour `npm run worker` session (with autonomous mode enabled) at least once and inspect
+`work_items`/`companies.notes`/logs afterward, per part 9 above, before fully trusting this
+phase's scheduling/backoff design against real usage patterns.
+
+---

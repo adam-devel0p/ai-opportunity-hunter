@@ -4,12 +4,12 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 10 (Outreach Writer) — complete. See
-[phases/phase-10-outreach-writer.md](phases/phase-10-outreach-writer.md) for the full writeup.
+**Last updated:** Phase 11 (Autonomous scheduler/worker) — complete. See
+[phases/phase-11-autonomous-worker.md](phases/phase-11-autonomous-worker.md) for the full writeup.
 
 ## Status
 
-Phases 0-9 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-11 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
 normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
 primitives (priority selection, lifecycle transition validation, failure classification, crash
@@ -33,12 +33,18 @@ deterministic), Phase 9's seventh real agent (the Contact Research Agent + the
 problem and persists a `contacts` row — the first phase to enforce spec §38's "never represent a
 guessed email as verified" hard rule at a dedicated data-access layer
 (`src/lib/contactDisplay.ts`) rather than trusting a future dashboard to check it correctly), and
-now Phase 10's eighth and final pipeline agent: the Outreach Writer + the `WRITE_OUTREACH` task
+Phase 10's eighth and final pipeline agent (the Outreach Writer + the `WRITE_OUTREACH` task
 handler, which writes one honest cold-outreach draft per verified opportunity with an offer and a
 contact, and persists an `outreach_drafts` row — the first handler that deliberately does NOT
 transition the opportunity's lifecycle status or enqueue further work, since actually sending mail
-is a manual operator action (spec §41), not something this pipeline does. No worker loop or
-dashboard yet — see PLAN.md Phase 11 onward.
+is a manual operator action, spec §41, not something this pipeline does), and now Phase 11's
+autonomous worker loop (`src/worker.ts`): the long-running process that ties every earlier
+handler together into continuous operation (spec §50), with `system_config`-driven pause/resume
+(spec §71, via a new minimal `src/lib/config.ts` and `scripts/autonomous.ts` CLI), quota-aware
+exponential backoff (spec §51, reusing every handler's existing `DEFERRED` convention), crash
+recovery wired to the live DB for the first time (Phase 2's `crashRecovery.ts`), and
+self-replenishing `DISCOVER` work via Phase 3's campaign selection. No dashboard yet — see
+PLAN.md Phase 12 onward.
 
 ## Actual stack in use
 
@@ -239,6 +245,14 @@ src/
                                   blacklist — freely reversible, no state-machine restriction)
                                   plus `setCampaignPriority`.
     campaigns.test.ts
+    config.ts                     `getAutonomousMode`/`setAutonomousMode` (spec §71, Phase 11)
+                                   and `getCampaignSelectionState`/`setCampaignSelectionState`
+                                   (persists `campaignSelection.ts`'s SWRR weights across worker
+                                   restarts) — a deliberately minimal `system_config` accessor,
+                                   scoped to exactly these two keys (ADR-0018 part 4). Every other
+                                   `system_config` key DATABASE_SCHEMA.md eventually wants remains
+                                   unwritten; Phase 14 owns the general config layer.
+    config.test.ts
   pipeline/
     stateMachine.ts              Lifecycle transition validators for all three §90-derived
                                   enums (company/opportunity/work-item), each its own table +
@@ -406,6 +420,12 @@ src/
                                      action, not this handler's job. Quota exhaustion/other
                                      failures handled the same way as every earlier handler.
     outreachHandler.test.ts
+  worker.ts                       The autonomous scheduler/worker loop (Phase 11, spec §50-51) —
+                                   see the dedicated section below for the full breakdown
+                                   (`recoverStuckWorkItems`, `ensureDiscoveryWork`,
+                                   `runWorkerCycle`, `runWorker`, `main()`). The process entry
+                                   point for `npm run worker`.
+  worker.test.ts
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
@@ -452,6 +472,9 @@ scripts/
                                  blocker as ADR-0015/0016: no opportunity has ever reached
                                  OUTREACH_READY; fixture tests cover the acceptance criteria
                                  instead).
+  autonomous.ts                  Toggles/reads `system_config`'s autonomous-mode flag (Phase 11,
+                                 spec §71). `npm run autonomous -- --status | --enable |
+                                 --disable`.
   hooks/
     captureSourceHook.ts          The ADR-0004 `PostToolUse` hook subprocess entry point (Phase
                                   5) — spawned directly by the `claude` CLI (via `--settings`,
@@ -467,6 +490,11 @@ drizzle/
   0001_naive_mathemanic.sql     Phase 6: adds `opportunities.existing_alternatives` /
                                  `validation_question`. Committed — this is real schema history,
                                  not build output.
+launchd/
+  com.aiopportunityhunter.worker.plist.example  Example macOS launchd job for `src/worker.ts`
+                                 (Phase 11, spec §11's "run while the laptop is awake"
+                                 convenience) — placeholder absolute paths, not auto-installed
+                                 (ADR-0018 part 10). Copy, edit, and `launchctl load` manually.
 docs/
   phases/
     phase-0-foundations.md     Phase 0 completion doc.
@@ -480,17 +508,18 @@ docs/
     phase-8-offer-builder.md   Phase 8 completion doc.
     phase-9-contact-research-agent.md Phase 9 completion doc.
     phase-10-outreach-writer.md Phase 10 completion doc.
+    phase-11-autonomous-worker.md Phase 11 completion doc.
 ```
 
-Nothing under `src/app` or `src/worker.ts` exists yet — those are Phase 11+ (see PLAN.md's
-target layout for what's still to come). No dashboard exists yet, and Phase 10's Outreach Writer
-is the last agent in the core pipeline (Phase 11 onward builds the worker loop and dashboard, not
-new agents, until Phase 13's feedback loop). Phase 2's `src/pipeline/` modules besides
+Nothing under `src/app` exists yet — that's Phase 12 (see PLAN.md's target layout for what's
+still to come). No dashboard exists yet, and Phase 10's Outreach Writer remains the last agent
+in the core pipeline (Phase 12 onward builds the dashboard and later the feedback loop, not new
+agents). Phase 2's `src/pipeline/` modules besides
 `campaignSelection.ts`/`discoverHandler.ts`/`prescreenHandler.ts`/`researchHandler.ts`/
 `analyzeHandler.ts`/`verifyHandler.ts`/`offerHandler.ts`/`contactHandler.ts`/`outreachHandler.ts`
-are still deterministic primitives only (pure functions over plain objects/arrays), not wired to
-`work_items` reads/writes — that wiring happens incrementally as each later phase's agent handler
-is built and finally in Phase 11's `worker.ts` loop, which is also what will actually run
+are still deterministic primitives only (pure functions over plain objects/arrays) — as of
+Phase 11, `crashRecovery.ts` and `priority.ts` are now also wired to live `work_items` reads/
+writes, via `src/worker.ts` (see the dedicated section below), which also now runs
 `campaignSelection.ts` autonomously instead of the operator picking a campaign by id via
 `scripts/discover.ts`.
 
@@ -618,8 +647,59 @@ orchestration themselves.
   filter (`RUNNING` + `startedAt` older than `DEFAULT_STUCK_RUNNING_TIMEOUT_MS` = 30 min, see
   ADR-0009 part 5; a `RUNNING` item with no `startedAt` is left alone rather than guessed at).
   `planStuckWorkItemRecovery` maps those to `{id, nextStatus: "RETRYABLE"}` via the validated
-  state-machine transition. Not wired to a live DB or called by anything yet — Phase 11's
-  `worker.ts` is what will actually run this once at startup against real `work_items` rows.
+  state-machine transition. As of Phase 11, `src/worker.ts`'s `recoverStuckWorkItems` runs this
+  once at startup against real `work_items` rows (see below).
+
+## `src/worker.ts` (Phase 11)
+
+The autonomous scheduler/worker loop (spec §50-51) — the first phase to wire `priority.ts` and
+`crashRecovery.ts` to a live DB and to run every Phase 3-10 handler continuously rather than one
+at a time via a `scripts/*.ts` CLI invocation. See ADR-0018 for the judgment calls behind this
+design.
+
+- `recoverStuckWorkItems(db, now, timeoutMs)` — runs once at worker startup: queries all
+  `RUNNING` work items, applies `crashRecovery.ts`'s pure `planStuckWorkItemRecovery`, and writes
+  each recovered item to `RETRYABLE`.
+- `ensureDiscoveryWork(db, now)` — called at the top of every cycle (skipped while paused): if no
+  `DISCOVER` item is in a non-terminal status (`PENDING`/`RUNNING`/`RETRYABLE`/`DEFERRED`), picks
+  the next `ENABLED` campaign via `campaignSelection.selectNextCampaign` (persisting its
+  round-robin weights in `system_config` via `src/lib/config.ts`) and enqueues one `DISCOVER`
+  item. Discovery is the only task type nothing upstream ever creates automatically — every other
+  type is enqueued by the handler that finishes the stage before it — so without this the queue
+  would run dry once the operator's manual `scripts/discover.ts` runs finished (ADR-0018 part 6).
+- `runWorkerCycle(options)` — one unit of work, no sleeping, no looping: checks
+  `getAutonomousMode` (returns `{kind: "paused"}` if off), calls `ensureDiscoveryWork`, selects
+  the single highest-priority eligible item via `priority.selectNextWorkItem` over every row in
+  `work_items`, transitions it to `RUNNING`, and dispatches it through `TASK_HANDLERS` (a
+  `Record<TaskType, TaskHandler>` mapping each task type to its real Phase 3-10 handler function,
+  overridable per-call via a `handlers` option for tests). The dispatch call is wrapped in
+  try/catch — a thrown error (e.g. a handler's own referential-integrity guard) is routed through
+  `failureClassification.resolveFailureOutcome` instead of propagating, the first real
+  implementation of spec §66/PLAN.md §8's "each task handler is wrapped so one failure never
+  takes down the loop" (ADR-0018 part 3). Returns a discriminated `{kind: "paused" | "idle" |
+  "ran", ...}` result; a `"ran"` result's `quotaExhausted` flag is derived from
+  `workItemStatus === "DEFERRED"`, reusing every handler's existing quota-exhaustion convention
+  rather than adding a new field (ADR-0018 part 1).
+- `runWorker(options)` — the actual `while` loop: recovers crashed work once, then repeatedly
+  calls `runWorkerCycle` and decides how long to wait before the next call — immediately again
+  after real work, the idle poll interval (`DEFAULT_IDLE_POLL_INTERVAL_MS` = 60s) when paused or
+  idle (this is also what makes a `system_config` pause/resume toggle take effect within one
+  cycle, spec §71), or an exponential backoff (`DEFAULT_QUOTA_BACKOFF_BASE_MS` = 30 min, doubling
+  per *consecutive* quota-exhausted cycle, capped at `DEFAULT_QUOTA_BACKOFF_MAX_MS` = 4h,
+  ADR-0018 part 2) after a quota-exhausted cycle. Accepts an injectable `sleep` function and
+  `maxCycles` bound for tests, and an `AbortSignal` for graceful shutdown between cycles (never
+  mid-handler) in real usage.
+- `main()` — the `npm run worker` process entry point: opens the real DB (`AOH_DB_PATH`, default
+  `./data/aoh.db`), wires `SIGINT`/`SIGTERM` to an `AbortController`, and logs each cycle's
+  outcome to stdout.
+- `TaskHandler`'s type signature takes a fourth `dbPath: string` parameter that only `RESEARCH`'s
+  wrapper uses (`researchHandler.ts`'s `RunResearchTaskOptions.dbPath`, needed by the ADR-0004
+  hook subprocess) — every other handler's closure simply ignores it, which TypeScript's
+  structural function typing permits (ADR-0018 part 7).
+- `REFRESH_EVIDENCE`'s `TASK_HANDLERS` entry is a deterministic-failure stub (transitions the
+  item straight to `FAILED` with a clear `lastError`) rather than a real handler — Phase 14 scope,
+  and nothing currently creates such an item, so this branch should be unreachable in practice
+  (ADR-0018 part 8).
 
 ## `src/config/models.ts`
 
@@ -712,15 +792,15 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   (Phase 6, `src/pipeline/analyzeHandler.ts`) — the ten component values and penalty reasons come
   from the Opportunity Analysis Agent's judgment, but the raw/adjusted arithmetic is always
   `scoring.ts`'s, never Claude's (ADR-0013 part 1).
-- No worker loop or scheduler exists yet (Phase 11), so `campaignSelection.ts`'s
-  weighted-round-robin selection state is never actually persisted anywhere — Phase 3 only
-  proves the pure selection function works; an operator runs discovery one campaign at a time
-  via `scripts/discover.ts --campaign <id>`, choosing the campaign themselves rather than
-  going through `selectNextCampaign`.
-- `system_config` (discovery volume, etc.) and `prompt_versions` are still not written to by
-  any code path — Phase 3 kept discovery volume as a code constant/CLI flag instead of building
-  a general config-accessor layer for one setting (ADR-0010 part 8), and prompt-template
-  versioning has no per-call log to link against yet (ADR-0010 part 9).
+- As of Phase 11, `src/worker.ts` runs `campaignSelection.selectNextCampaign` autonomously via
+  `ensureDiscoveryWork`, with its round-robin state persisted in `system_config` (a new
+  `src/lib/config.ts`, ADR-0018 part 4) — an operator can still run `scripts/discover.ts
+  --campaign <id>` manually for a one-off campaign, but the worker no longer needs that.
+- `system_config` now has exactly two keys written by any code path (`autonomousMode`,
+  `campaignSelectionState`, both via `src/lib/config.ts`, Phase 11) — every other key
+  DATABASE_SCHEMA.md eventually wants (discovery volume, score threshold, pricing bands,
+  country/industry allowlists, ...) remains unwritten, same as before (ADR-0010 part 8, now also
+  ADR-0018 part 4). `prompt_versions` is still not written to by any code path (ADR-0010 part 9).
 - `companies.notes` is now used for several purposes: genuine operator notes, a seeded
   `"Discovery reason: ..."` string (Phase 3, ADR-0010 part 7), a `"Prescreen (...): ..."` line
   (Phase 4, ADR-0011 part 4), a `"Research: N evidence item(s) recorded..."` summary plus a
@@ -810,3 +890,22 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   before enqueueing the `WRITE_OUTREACH` item that leads here, but would need a real FK if a
   future phase ever lets a company accumulate multiple concurrent in-flight opportunities each
   with their own contact.
+- No live multi-hour autonomous `npm run worker` run (with autonomous mode actually enabled) has
+  been performed yet against real campaigns/companies (ADR-0018 part 9) — only a zero-cost,
+  autonomous-mode-off smoke test confirming the process starts/logs/shuts down cleanly. The
+  operator should run one deliberately and inspect `work_items`/`companies.notes`/the worker's
+  log output afterward before fully trusting the scheduling/quota-backoff design at real usage
+  volumes — same category of deferred live verification as Phases 8-10's offer/contact/outreach
+  smoke tests.
+- `ensureDiscoveryWork` (Phase 11) caps in-flight `DISCOVER` items at one regardless of how many
+  campaigns are `ENABLED` (ADR-0018 part 6) — a reasoned starting point, not empirically tuned;
+  revisit if real usage shows the queue idling for meaningful stretches on a single slow/
+  quota-deferred `DISCOVER` item while other campaigns sit ready to run.
+- The worker's quota-exhaustion backoff constants (`DEFAULT_QUOTA_BACKOFF_BASE_MS` = 30 min,
+  `DEFAULT_QUOTA_BACKOFF_MAX_MS` = 4h, Phase 11) are a reasoned starting point, not tuned against
+  real Claude usage-limit reset timing — same category as every earlier phase's placeholder
+  constants (ADR-0008/0009/0012/0014/0015).
+- `launchd/com.aiopportunityhunter.worker.plist.example` (Phase 11) has not been installed and
+  run end-to-end as a real `launchctl` job in this phase (ADR-0018 part 10) — only `npm run
+  worker` directly has been verified live. The operator should test the actual `launchctl load`
+  path with their own filled-in paths before relying on it.

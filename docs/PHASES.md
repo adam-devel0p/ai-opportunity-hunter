@@ -17,13 +17,13 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 8 | Offer Builder + pricing | ✅ | [phase-8-offer-builder.md](phases/phase-8-offer-builder.md) |
 | 9 | Contact Research Agent | ✅ | [phase-9-contact-research-agent.md](phases/phase-9-contact-research-agent.md) |
 | 10 | Outreach Writer | ✅ | [phase-10-outreach-writer.md](phases/phase-10-outreach-writer.md) |
-| 11 | Autonomous scheduler/worker | ⬜ | — |
+| 11 | Autonomous scheduler/worker | ✅ | [phase-11-autonomous-worker.md](phases/phase-11-autonomous-worker.md) |
 | 12 | Dashboard MVP | ⬜ | — |
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 11 — Autonomous scheduler/worker
-**Next phase:** 12 — Dashboard MVP
+**Current phase:** 12 — Dashboard MVP
+**Next phase:** 13 — Feedback loop & outcome analytics
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -198,6 +198,26 @@ judgment calls made (model tier/no tools, the three independent deterministic-ch
 their "collect every reason" aggregation, the truthfulness heuristic's structural-approximation
 design, the `"[Your name]"` sign-off placeholder, the deliberate no-status-transition/no-enqueue
 behavior, the company-keyed contact lookup, and the deferred live smoke test).
+
+Phase 11 added the long-running autonomous loop: `src/worker.ts` ties every Phase 2-10 primitive
+and handler together into continuous operation (spec §50), wiring Phase 2's `crashRecovery.ts` and
+`priority.ts` to the live `work_items` table for the first time. Each cycle checks a new minimal
+`system_config` accessor (`src/lib/config.ts`) for autonomous mode (spec §71 pause/resume,
+`scripts/autonomous.ts` the CLI toggle until Phase 12's dashboard), tops up `DISCOVER` work via
+Phase 3's `selectNextCampaign` when none is in flight, selects the single highest-priority eligible
+item, and dispatches it to the matching handler — wrapped in try/catch so a thrown error is routed
+through `failureClassification.ts` instead of crashing the loop (spec §66, the first phase where
+that's literally wired up). Quota exhaustion (spec §51) is detected by reusing every handler's
+existing `DEFERRED` convention and handled with worker-owned exponential backoff (30 min base,
+doubling, capped at 4h), never a tight retry loop and never automatic API-key fallback. An example
+macOS `launchd` plist is provided as a `.example` template. Manually verified live (zero-cost,
+autonomous mode off) against the real project DB — `npm run worker` starts, logs `paused`, and
+shuts down cleanly on `SIGINT` — see
+[phase-11-autonomous-worker.md](phases/phase-11-autonomous-worker.md) and new ADR-0018 for the
+judgment calls made (reusing `DEFERRED` as the quota signal, worker-owned vs. per-item backoff,
+the try/catch handler wrapping, the new config accessor's deliberately narrow scope, autonomous
+mode's safe default, the discovery-replenishment design, `dbPath` threading through a shared
+handler type, the `REFRESH_EVIDENCE` stub, and the deferred live multi-hour run).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its
