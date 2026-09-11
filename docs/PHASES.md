@@ -13,7 +13,7 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 4 | Pre-Screening Agent | ✅ | [phase-4-prescreening-agent.md](phases/phase-4-prescreening-agent.md) |
 | 5 | Deep Research Agent + evidence model | ✅ | [phase-5-deep-research-agent.md](phases/phase-5-deep-research-agent.md) |
 | 6 | Opportunity Analysis Agent + scoring | ✅ | [phase-6-opportunity-analysis-agent.md](phases/phase-6-opportunity-analysis-agent.md) |
-| 7 | Skeptical Verification Agent + gating | ⬜ | — |
+| 7 | Skeptical Verification Agent + gating | ✅ | [phase-7-skeptic-verification-agent.md](phases/phase-7-skeptic-verification-agent.md) |
 | 8 | Offer Builder + pricing | ⬜ | — |
 | 9 | Contact Research Agent | ⬜ | — |
 | 10 | Outreach Writer | ⬜ | — |
@@ -22,8 +22,8 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 7 — Skeptical Verification Agent + strong-opportunity gating
-**Next phase:** 8 — Offer Builder + pricing
+**Current phase:** 8 — Offer Builder + pricing
+**Next phase:** 9 — Contact Research Agent
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -106,6 +106,27 @@ and new ADR-0013 for the judgment calls made (score components/penalties as agen
 judgment inputs vs. deterministic arithmetic, always forming an opportunity regardless of score,
 the single-write status collapse, tool/model-tier choice, currency-unit-to-cents conversion, the
 two schema fixes, and spec §59 deferral).
+
+Phase 7 added the fifth real agent: the Skeptical Verification Agent
+(`src/agents/skepticAgent.ts`, reasoning model tier, no tools) and the `VERIFY` work-item handler
+(`src/pipeline/verifyHandler.ts`) — the first phase where an opportunity can actually be
+rejected. The skeptic runs a fresh-context adversarial pass (spec §33's question list embedded
+verbatim) over an opportunity's factual content + evidence, deliberately never seeing the
+Opportunity Analysis Agent's own `confidence`/`scoreComponents`/`penaltyReasons`. Its KEEP/REJECT
+is one of four independent inputs to a new deterministic strong-opportunity gate
+(`src/lib/opportunityGate.ts`, spec §32) alongside the adjusted score vs. a ~75/100 threshold, the
+evidence-strength component vs. a floor, and a new deterministic risk-category classifier
+(`src/lib/riskCategory.ts`, spec §8) that flags high-risk decision domains from the proposed
+solution's text (never from `companies.industry` alone). Any one failing check fails the whole
+gate: a pass transitions the opportunity to `VERIFIED` and enqueues `BUILD_OFFER`; any failure —
+not only an explicit skeptic REJECT — transitions it to `VERIFIER_REJECTED`. Manually verified
+live against all 8 real veterinary-clinic opportunities from Phases 3-6 (all correctly REJECTed,
+low confidence throughout) — see
+[phase-7-skeptic-verification-agent.md](phases/phase-7-skeptic-verification-agent.md) and new
+ADR-0014 for the judgment calls made (fresh-context input shape, gate independence/reason
+collection, `VERIFIER_REJECTED` reused for every gate failure, deterministic risk
+classification and the same-sentence-proximity fix a live false positive required, gate-config
+defaults, and `BUILD_OFFER` enqueueing).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

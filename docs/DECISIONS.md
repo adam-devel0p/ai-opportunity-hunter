@@ -674,3 +674,99 @@ penalty values were chosen against. Phase 12's dashboard will need `evidence_ite
 (now populated) to render the WHAT WE KNOW/INFER/DON'T KNOW breakdown per spec §85.
 
 ---
+
+## ADR-0014: Phase 7 (Skeptical Verification Agent + strong-opportunity gating) judgment calls
+
+**Status:** Accepted (Phase 7).
+
+**Decision, part 1 — the Skeptic Agent's input deliberately omits `confidence`,
+`scoreComponents`, and `penaltyReasons`:** AGENT_CONTRACTS.md §5 requires "fresh context" —
+access to "the research and proposal" but not "the Opportunity Analysis Agent's own
+reasoning/confidence framing" (spec §33). `verifyHandler.ts` enforces this structurally, not by
+prompt instruction alone: `SkepticOpportunityInput` (the type the handler actually builds from
+the `opportunities` row) has no field for the analysis agent's `confidence`, and the score
+components/penalty reasons live only in `opportunity_evaluations`, which the handler reads for
+the *gate* but never forwards into the skeptic's prompt. The skeptic returns its own
+`adjustedConfidence` independent of anything it was given.
+
+**Decision, part 2 — the gate's "did the skeptic REJECT" check is orthogonal to and independent
+of the score/evidence/risk checks, and any one failing reason fails the whole gate:**
+`src/lib/opportunityGate.ts`'s `evaluateOpportunityGate` treats spec §32's four listed
+requirements ("sufficient evidence score," "sufficient overall score," "acceptable
+implementation risk," "skeptical reviewer returns KEEP") as four independent pass/fail checks,
+not a weighted composite — a single failure is enough to reject, and all failing reasons are
+collected (not just the first) so `companies.notes` and the CLI output can show the complete
+picture. This directly enables the §88-fixture requirement ("REJECTed by the skeptic and fails
+gating regardless [of score]") — the fixture test in `verifyHandler.test.ts` seeds an
+artificially high adjusted score specifically to prove REJECT alone is sufficient to fail, not
+merely correlated with a low score.
+
+**Decision, part 3 — the opportunity-lifecycle binary (`VERIFIED`/`VERIFIER_REJECTED`) reuses
+`VERIFIER_REJECTED` for every gate failure, not only an explicit skeptic REJECT:**
+`opportunities.status`'s enum (built Phase 1) has no third "gate failed for a non-skeptic reason"
+value — only `VERIFIED` and `VERIFIER_REJECTED` follow `VERIFICATION_PENDING`. Spec §32 frames
+gating as one combined decision ("a prospect should only reach the dashboard as a Strong
+Opportunity when it satisfies..."), so a KEEP that still fails on score, evidence floor, or risk
+category is treated the same as an explicit REJECT for lifecycle purposes: `VERIFIER_REJECTED`,
+with the specific reason(s) recorded in the `opportunity_evaluations.verifier*` columns (the
+skeptic's real output) plus a `companies.notes` line listing every gate reason (which can name
+score/evidence/risk failures the skeptic itself never flagged). An operator inspecting a
+`VERIFIER_REJECTED` opportunity in a later dashboard phase should read the notes line, not assume
+the skeptic literally said REJECT.
+
+**Decision, part 4 — risk-category classification (spec §8) is a deterministic keyword/phrase
+heuristic (`src/lib/riskCategory.ts`), not a Claude judgment:** PLAN.md's Phase 7 text frames the
+gate as combining "risk category" alongside the already-deterministic score/evidence checks, and
+its acceptance criteria explicitly ask for "unit tests for the gating function directly
+(threshold, risk-category interaction) fully independent of any Claude call" — which requires
+risk classification to be deterministic input, not itself a Claude call. Spec §8's own example
+(clinic appointment-intake automation is fine; clinic diagnosis automation is not, same
+industry) rules out classifying by `companies.industry` alone, so `classifyOpportunityRisk`
+matches against the opportunity's `problemCategory`/`problemDescription`/`proposedSolution`/
+`implementationStrategy` text instead, using one regex per spec §8 bullet. This is the same
+"reasoned heuristic, not real NLP" category as `failureClassification.ts`'s error-text patterns
+(ADR-0009 part 4) — expect false positives/negatives and more patterns needed as real
+opportunities are classified against it.
+
+Two of the classifier's patterns (`diagnos\w*`/`prescrib\w*`/etc.) needed a same-*sentence*
+context requirement (`requiresContext`, checked per-sentence via `splitIntoSentences`, not
+merely "appears anywhere in the document") after this phase's live smoke test caught a real
+false positive: a "technical SEO diagnostic" audit opportunity was flagged `HIGH_RISK` for
+"medical diagnosis" purely because the bare word "diagnostic" matched, with an unrelated mention
+of a "patient portal" elsewhere in the same opportunity's evidence text satisfying a
+whole-document co-occurrence check that was tried first and rejected as too loose. The fix
+requires the diagnos/prescrib word and a medical-context word (patient/medical/clinical/
+symptom/etc.) to appear in the *same* rough sentence. The design deliberately stays
+conservative/over-inclusive elsewhere (e.g. `PenaltyReason`-style "medical records requests" in
+an intake-categorization opportunity still flags `HIGH_RISK` per the "highly sensitive regulated
+personal information" pattern, observed live against a real veterinary-clinic opportunity) — a
+false positive here only routes the opportunity to require operator review (`allowHighRisk`
+opt-in), not a silent, unrecoverable rejection, so erring toward flagging is the safer failure
+mode per spec §8's "unless explicitly reviewed by the operator."
+
+**Decision, part 5 — gate configuration (threshold/evidence-floor/high-risk policy) is a function
+parameter with a code-constant default, not a `system_config` read:** Same pattern and reasoning
+as ADR-0010 part 8 (discovery volume) and ADR-0012 part 7 (freshness windows) — no general
+`system_config` accessor layer exists yet, and building one for this phase's three settings alone
+is out of scope. `DEFAULT_OPPORTUNITY_GATE_CONFIG` in `src/lib/opportunityGate.ts` sets
+`scoreThreshold: 75` (spec §32's stated initial target), `evidenceStrengthFloor: 10` (half of the
+`evidenceStrength` component's 0-20 range — a reasoned starting point, not empirically tuned, same
+category as ADR-0008/0009's other placeholder constants), and `allowHighRisk: false` (spec §8's
+default-exclude policy). `runVerifyTask` accepts an optional `gateConfig` override so a later
+phase's config-accessor layer or dashboard control can supply a live value without changing this
+handler's signature.
+
+**Decision, part 6 — `BUILD_OFFER` is enqueued on a gate pass, even though the Offer Builder
+agent doesn't exist yet:** Same "each handler wires the next stage's queue, regardless of whether
+that stage's agent is built yet" pattern as every prior phase (ADR-0012 part 5 for
+`RESEARCH -> ANALYZE`, `analyzeHandler.ts` for `ANALYZE -> VERIFY`) — PLAN.md's Phase 7
+"explicitly NOT built" scope covers the Offer Builder *agent*, not queue wiring for it.
+
+**Consequences:** Phase 8 (Offer Builder) reads `opportunities` rows with status `VERIFIED` and
+their linked `opportunity_evaluations.verifier*` fields, and picks up `BUILD_OFFER` work items
+this phase enqueues. `DEFAULT_OPPORTUNITY_GATE_CONFIG`'s three constants and
+`riskCategory.ts`'s pattern list remain reasoned starting points — flag in a later phase's
+completion doc if real usage suggests they're off, same as ADR-0008/0009/0012's other
+placeholders.
+
+---

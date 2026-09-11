@@ -4,13 +4,13 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 6 (Opportunity Analysis Agent + scoring wiring) — complete. See
-[phases/phase-6-opportunity-analysis-agent.md](phases/phase-6-opportunity-analysis-agent.md) for
-the full writeup.
+**Last updated:** Phase 7 (Skeptical Verification Agent + strong-opportunity gating) — complete.
+See [phases/phase-7-skeptic-verification-agent.md](phases/phase-7-skeptic-verification-agent.md)
+for the full writeup.
 
 ## Status
 
-Phases 0-6 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-7 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
 normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
 primitives (priority selection, lifecycle transition validation, failure classification, crash
@@ -19,11 +19,15 @@ the Discovery Agent, diversity-aware campaign selection, the `DISCOVER` task han
 second real agent (the Pre-Screening Agent + the `PRESCREEN` task handler), Phase 5's third real
 agent (the Deep Research Agent + the `RESEARCH` task handler, which persists provenance-verified
 evidence and enqueues `ANALYZE` work, plus the ADR-0004 `PostToolUse` evidence-provenance hook),
-and now Phase 6's fourth real agent: the Opportunity Analysis Agent + the `ANALYZE` task handler,
-which turns a company's evidence into a scored `opportunities`/`opportunity_evaluations` row —
-the first phase to wire `src/lib/scoring.ts` (built in Phase 1) to real data, and to enqueue
-`VERIFY` work. No worker loop or dashboard yet, and no agent past Opportunity Analysis — see
-PLAN.md Phase 7 onward.
+Phase 6's fourth real agent (the Opportunity Analysis Agent + the `ANALYZE` task handler, which
+turns a company's evidence into a scored `opportunities`/`opportunity_evaluations` row — the
+first phase to wire `src/lib/scoring.ts` to real data), and now Phase 7's fifth real agent: the
+Skeptical Verification Agent + the `VERIFY` task handler, which runs a fresh-context adversarial
+pass over a formed opportunity and combines it with a deterministic strong-opportunity gate
+(score threshold, evidence-strength floor, risk-category classification) to decide
+`VERIFIED` vs. `VERIFIER_REJECTED` — the first phase where an opportunity can actually be
+rejected, and the first to enqueue `BUILD_OFFER` work. No worker loop or dashboard yet, and no
+agent past Skeptical Verification — see PLAN.md Phase 8 onward.
 
 ## Actual stack in use
 
@@ -92,6 +96,14 @@ src/
                                   honest-evidence integrity rules verbatim), `runOpportunityAnalysisAgent`
                                   (reasoning model tier, no tools — ADR-0013 part 4).
     opportunityAnalysisAgent.test.ts
+    skepticAgent.ts             Skeptical Verification Agent (AGENT_CONTRACTS.md §5, Phase 7):
+                                 Zod schema + hand-mirrored JSON Schema, prompt builder (embeds
+                                 spec §33's question list verbatim, biases the model toward
+                                 REJECT on mediocre cases), `runSkepticAgent` (reasoning model
+                                 tier, no tools — ADR-0014). Input type deliberately has no field
+                                 for the Analysis Agent's `confidence`/`scoreComponents`/
+                                 `penaltyReasons` (fresh-context enforcement, ADR-0014 part 1).
+    skepticAgent.test.ts
     schemas/
       deepResearchSpike.ts    Draft Zod + JSON Schema pair for the spike script only —
                                superseded by deepResearchAgent.ts's real contract; kept only
@@ -129,6 +141,25 @@ src/
                                  (default 90-day window, ADR-0012 part 7), set by
                                  `researchHandler.ts` on every successful research run.
     researchFreshness.test.ts
+    riskCategory.ts              `classifyOpportunityRisk` (spec §8, Phase 7) — deterministic
+                                  keyword/phrase heuristic over the opportunity's
+                                  problem/solution text (never `companies.industry` alone, per
+                                  spec §8's own clinic-intake-vs-diagnosis example), one regex
+                                  per spec §8 high-risk domain. Two patterns require a
+                                  same-*sentence* medical-context word (`requiresContext`) to
+                                  avoid generic-word false positives (e.g. a "diagnostic" audit)
+                                  — see ADR-0014 part 4 for the real false positive this closed.
+    riskCategory.test.ts
+    opportunityGate.ts            `evaluateOpportunityGate` (spec §32, Phase 7) — the
+                                   deterministic strong-opportunity gate: combines
+                                   `verifierResult`, `adjustedScore` vs. a configurable
+                                   threshold (default 75), `evidenceStrength` vs. a configurable
+                                   floor (default 10), and `riskCategory` vs. an
+                                   operator-opt-in policy (default excluded). Any one failing
+                                   check fails the whole gate; every failing reason is
+                                   collected, not just the first (ADR-0014 part 2). Pure, no DB,
+                                   no Claude call — `verifyHandler.ts` is the only caller.
+    opportunityGate.test.ts
     campaigns.ts                 `discovery_campaigns` CRUD (Phase 3, spec §15): create/list/
                                   get, and operator status toggles (enable/pause/disable/
                                   blacklist — freely reversible, no state-machine restriction)
@@ -221,6 +252,23 @@ src/
                                   exhaustion/other failures handled the same way as
                                   `discoverHandler.ts`/`prescreenHandler.ts`/`researchHandler.ts`.
     analyzeHandler.test.ts
+    verifyHandler.ts               `runVerifyTask` (Phase 7) — the fifth live-DB-wired task
+                                    handler: loads the opportunity a `VERIFY` work item targets
+                                    (`entityId` is an *opportunity* id, the first task type
+                                    where that's true — set by `analyzeHandler.ts`), its
+                                    `opportunity_evaluations` row, its linked evidence, and the
+                                    owning company, runs the Skeptical Verification Agent with a
+                                    fresh-context input (ADR-0014 part 1), classifies risk
+                                    (`riskCategory.ts`), evaluates the spec §32 gate
+                                    (`opportunityGate.ts`), persists the skeptic's output into
+                                    `opportunity_evaluations.verifier*`, transitions the
+                                    opportunity to `VERIFIED` or `VERIFIER_REJECTED` in one write
+                                    (ADR-0014 part 3), appends a full-reasons summary to
+                                    `companies.notes`, and — on a gate pass only — enqueues a
+                                    `BUILD_OFFER` work item (ADR-0014 part 6). Quota
+                                    exhaustion/other failures handled the same way as every
+                                    earlier handler.
+    verifyHandler.test.ts
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
@@ -242,6 +290,10 @@ scripts/
                                  (Phase 6's manual smoke-test entry point). `npm run analyze --
                                  --company <id>` for one, or `--all [--limit <n>]` for every
                                  PENDING ANALYZE item.
+  verify.ts                      Runs real VERIFY work items against the live `claude` CLI
+                                 (Phase 7's manual smoke-test entry point). `npm run verify --
+                                 --opportunity <id>` for one, or `--all [--limit <n>]` for every
+                                 PENDING VERIFY item.
   hooks/
     captureSourceHook.ts          The ADR-0004 `PostToolUse` hook subprocess entry point (Phase
                                   5) — spawned directly by the `claude` CLI (via `--settings`,
@@ -266,17 +318,18 @@ docs/
     phase-4-prescreening-agent.md Phase 4 completion doc.
     phase-5-deep-research-agent.md Phase 5 completion doc.
     phase-6-opportunity-analysis-agent.md Phase 6 completion doc.
+    phase-7-skeptic-verification-agent.md Phase 7 completion doc.
 ```
 
 Nothing under `src/app` or `src/worker.ts` exists yet — those are Phase 11+ (see PLAN.md's
-target layout for what's still to come). No dashboard and no agent past Opportunity Analysis
+target layout for what's still to come). No dashboard and no agent past Skeptical Verification
 exist yet. Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts`/
-`prescreenHandler.ts`/`researchHandler.ts`/`analyzeHandler.ts` are still deterministic primitives
-only (pure functions over plain objects/arrays), not wired to `work_items` reads/writes — that
-wiring happens incrementally as each later phase's agent handler is built (Phase 7 onward) and
-finally in Phase 11's `worker.ts` loop, which is also what will actually run
-`campaignSelection.ts` autonomously instead of the operator picking a campaign by id via
-`scripts/discover.ts`.
+`prescreenHandler.ts`/`researchHandler.ts`/`analyzeHandler.ts`/`verifyHandler.ts` are still
+deterministic primitives only (pure functions over plain objects/arrays), not wired to
+`work_items` reads/writes — that wiring happens incrementally as each later phase's agent handler
+is built (Phase 8 onward) and finally in Phase 11's `worker.ts` loop, which is also what will
+actually run `campaignSelection.ts` autonomously instead of the operator picking a campaign by id
+via `scripts/discover.ts`.
 
 ## `src/agents/claudeClient.ts`
 
@@ -480,9 +533,9 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   onward wires the rest incrementally; Phase 11's `worker.ts` is what runs `crashRecovery` at
   startup and drives the main loop instead of the operator invoking `scripts/discover.ts`/
   `scripts/prescreen.ts`/`scripts/research.ts`/`scripts/analyze.ts` by hand.
-- `VERIFY` work items now exist in the live DB (created by `analyzeHandler.ts` on every
-  successful analysis) but nothing consumes them yet — Phase 7's Skeptical Verification Agent is
-  the first handler that will pick them up.
+- `BUILD_OFFER` work items now exist in the live DB (created by `verifyHandler.ts` on every gate
+  pass) but nothing consumes them yet — Phase 8's Offer Builder is the first handler that will
+  pick them up.
 - `src/pipeline/failureClassification.ts`'s pattern lists (transient vs. permanent error text)
   are a reasoned starting point, not exhaustive — Phase 3's live discovery runs didn't exercise
   the failure path (both real runs succeeded), so these patterns are still unvalidated against
@@ -529,3 +582,18 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
 - `sources.title` is always null (Phase 5) — `WebFetch`'s `tool_response` never includes a page
   title (see "Claude CLI hook findings" above), only its extracted-answer text. Getting a real
   title would need a separate fetch mechanism (e.g. `curl` via Bash); not pursued this phase.
+- `src/lib/riskCategory.ts` (Phase 7) is a keyword/phrase heuristic, not real NLP — it will miss
+  high-risk phrasing it has no pattern for, and (by design, per ADR-0014 part 4) errs toward
+  over-flagging borderline cases like an intake form's "medical records requests" category rather
+  than under-flagging. Its patterns were already extended once, mid-phase, after a live smoke
+  test caught a real false positive ("technical SEO diagnostic" flagged as medical diagnosis) —
+  expect more patterns to be needed as real opportunities are classified against it.
+- `DEFAULT_OPPORTUNITY_GATE_CONFIG`'s three constants (`scoreThreshold: 75`,
+  `evidenceStrengthFloor: 10`, `allowHighRisk: false`) are reasoned starting points, not
+  empirically tuned (ADR-0014 part 5) — same category as ADR-0008/0009/0012's other placeholder
+  constants. No `system_config` wiring exists yet to let an operator change them without a code
+  change; `runVerifyTask` accepts a `gateConfig` override for whenever that wiring exists.
+- An operator wanting to let a specific `HIGH_RISK` opportunity through (spec §8's "unless
+  explicitly reviewed by the operator") currently has no dashboard control — only a code-level
+  `gateConfig.allowHighRisk` override, which is global, not per-opportunity. A later phase (the
+  Phase 12 dashboard, most likely) should add a real per-opportunity override path.

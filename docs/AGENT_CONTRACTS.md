@@ -127,8 +127,18 @@ so there's no code path where a Claude-supplied number could reach the database)
 
 ## 5. Skeptical Verification Agent (Phase 7)
 
-**Input:** the opportunity + its evidence, in a fresh context (no access to the Opportunity
-Analysis Agent's own reasoning/confidence, spec §33).
+**Input** (as actually implemented, `src/agents/skepticAgent.ts`): the opportunity's factual
+content (`problemTitle`/`problemDescription`/`problemCategory`/`economicImpact`/
+`impactAssumptions`/`affectedRole`/`proposedSolution`/`implementationStrategy`/`dependencies`/
+`risks`/`existingAlternatives`/`estimatedDurationDays`/`suggestedPriceMin`/`suggestedPriceMax`/
+`recurringRevenuePossibility`/`validationQuestion`, plus minimal company context) and its linked
+evidence — in a fresh context that deliberately omits the Opportunity Analysis Agent's own
+`confidence`, `scoreComponents`, and `penaltyReasons` (spec §33's "no access to the Opportunity
+Analysis Agent's own reasoning/confidence framing"; `src/pipeline/verifyHandler.ts` enforces this
+structurally by simply never reading those fields into the skeptic's input type, not merely by
+prompt instruction — see ADR-0014 part 1). Uses the `"reasoning"` model tier and no tools (same
+reasoning as Opportunity Analysis, ADR-0013 part 4: this is judgment over already-gathered
+material, nothing left to fetch or search).
 
 **Output:**
 ```ts
@@ -143,6 +153,14 @@ z.object({
 ```
 Prompt explicitly instructs the model to try to disprove the opportunity (spec §33 question
 list embedded verbatim) and to be biased toward REJECT on mediocre cases.
+
+**Gating (spec §32):** `result` is one of four independent inputs to the deterministic
+`src/lib/opportunityGate.ts` (`verifierResult`, `opportunity_evaluations.adjustedScore` vs. a
+~75/100 threshold, `evidenceStrength` vs. a floor, and a deterministic risk-category
+classification from `src/lib/riskCategory.ts`, spec §8) — any one failing check fails the whole
+gate (see ADR-0014 parts 2-4). A gate pass transitions the opportunity `VERIFICATION_PENDING ->
+VERIFIED` and enqueues `BUILD_OFFER`; any failure (not only an explicit skeptic REJECT) goes to
+`VERIFIER_REJECTED` (ADR-0014 part 3).
 
 ## 6. Offer Builder (Phase 8)
 
