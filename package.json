@@ -16,7 +16,8 @@
     "db:migrate": "tsx scripts/db/migrate.ts",
     "campaigns": "tsx scripts/campaigns.ts",
     "discover": "tsx scripts/discover.ts",
-    "prescreen": "tsx scripts/prescreen.ts"
+    "prescreen": "tsx scripts/prescreen.ts",
+    "research": "tsx scripts/research.ts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

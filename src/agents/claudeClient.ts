@@ -50,6 +50,19 @@ export interface ClaudeInvocationOptions {
   jsonSchema?: Record<string, unknown>;
   /** Kills the subprocess and resolves with status "error" if exceeded. */
   timeoutMs?: number;
+  /**
+   * Extra settings merged via `--settings <json>` (e.g. the ADR-0004 PostToolUse hook
+   * registration used by the Deep Research Agent, Phase 5). Absent by default — most agents
+   * need no settings beyond the explicit `--tools`/`--allowedTools` restriction.
+   */
+  settings?: Record<string, unknown>;
+  /**
+   * Extra env vars merged into the sanitized child env, on top of `buildSanitizedEnv()`'s
+   * clone of `process.env` — e.g. context (DB path, task id) a `--settings`-registered hook
+   * subprocess needs, since a hook runs as its own OS process and can't share in-memory state
+   * with this one. `ANTHROPIC_API_KEY` is still always stripped even if present here.
+   */
+  extraEnv?: NodeJS.ProcessEnv;
   /** Escape hatch for flags not otherwise modeled here. */
   extraArgs?: string[];
   /** Override the binary name/path — used by tests. */
@@ -138,6 +151,9 @@ function buildArgs(options: ClaudeInvocationOptions): string[] {
   if (options.jsonSchema) {
     args.push("--json-schema", JSON.stringify(options.jsonSchema));
   }
+  if (options.settings) {
+    args.push("--settings", JSON.stringify(options.settings));
+  }
   if (options.extraArgs) {
     args.push(...options.extraArgs);
   }
@@ -149,7 +165,10 @@ export async function invokeClaude(
 ): Promise<ClaudeInvocationResult> {
   warnIfApiKeyPresent();
 
-  const env = buildSanitizedEnv();
+  const env = { ...buildSanitizedEnv(), ...options.extraEnv };
+  // Defensive: strip again in case a caller's extraEnv accidentally included it — the
+  // structural guarantee (ADR-0001) must hold regardless of what any call site passes in.
+  delete env[ANTHROPIC_API_KEY_VAR];
   const bin = options.claudeBin ?? "claude";
   const args = buildArgs(options);
 

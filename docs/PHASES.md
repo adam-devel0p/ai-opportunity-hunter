@@ -11,7 +11,7 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 2 | Work queue & state machine | ✅ | [phase-2-work-queue.md](phases/phase-2-work-queue.md) |
 | 3 | Discovery Agent + campaigns | ✅ | [phase-3-discovery-agent.md](phases/phase-3-discovery-agent.md) |
 | 4 | Pre-Screening Agent | ✅ | [phase-4-prescreening-agent.md](phases/phase-4-prescreening-agent.md) |
-| 5 | Deep Research Agent + evidence model | ⬜ | — |
+| 5 | Deep Research Agent + evidence model | ✅ | [phase-5-deep-research-agent.md](phases/phase-5-deep-research-agent.md) |
 | 6 | Opportunity Analysis Agent + scoring | ⬜ | — |
 | 7 | Skeptical Verification Agent + gating | ⬜ | — |
 | 8 | Offer Builder + pricing | ⬜ | — |
@@ -22,8 +22,8 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 5 — Deep Research Agent + evidence model
-**Next phase:** 6 — Opportunity Analysis Agent + scoring
+**Current phase:** 6 — Opportunity Analysis Agent + scoring
+**Next phase:** 7 — Skeptical Verification Agent + gating
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -70,6 +70,23 @@ Manually verified live against all 8 real veterinary clinics Phase 3 discovered 
 judgment calls made (`MAYBE` treated the same as `PROMISING`, `WebFetch`-only tooling, the
 forward-looking freshness check, reason storage in `notes`, and single-write transitive lifecycle
 transitions).
+
+Phase 5 added the third real agent: the Deep Research Agent (`src/agents/deepResearchAgent.ts`,
+reasoning model tier, `WebSearch`+`WebFetch`) and the `RESEARCH` work-item handler
+(`src/pipeline/researchHandler.ts`) that persists evidence — but only evidence items whose
+`sourceUrl` matches a `sources` row the new ADR-0004 `PostToolUse` hook
+(`src/agents/sourceCaptureHook.ts`, `scripts/hooks/captureSourceHook.ts`) independently recorded
+during that same task; anything else is dropped rather than persisted with unverifiable
+provenance. `claudeClient.ts` gained `settings`/`extraEnv` options to support this (ADR-0012).
+On success, the company transitions `RESEARCH_PENDING -> RESEARCHED` (unconditionally, even with
+thin/no evidence — that's Phase 6's judgment to make), `nextEligibleResearchAt`/
+`lastResearchedAt` are set deterministically (`src/lib/researchFreshness.ts`, spec §60), and an
+`ANALYZE` work item is enqueued for Phase 6. Manually verified live against all 8 real
+veterinary clinics from Phases 3-4 — see [phase-5-deep-research-agent.md](phases/phase-5-deep-research-agent.md)
+and new ADR-0012 for the judgment calls made (hook delivery mechanism and matcher scope,
+env-var-based hook context passing, the sourceUrl↔source cross-check and its drop policy, model
+tier, unconditional `RESEARCHED` transition + `ANALYZE` enqueueing, notes-field conventions, and
+the two new freshness-threshold constants).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

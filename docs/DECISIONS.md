@@ -489,3 +489,97 @@ this phase's handler creates — it should read `companies.notes` if it wants pr
 though it isn't required to (the company record itself carries everything Deep Research's
 contract needs). Same pattern as ADR-0010: document new judgment calls in a new ADR part rather
 than silently deviating.
+
+---
+
+## ADR-0012: Phase 5 (Deep Research Agent + evidence model) judgment calls
+
+**Status:** Accepted (Phase 5).
+
+**Decision, part 1 — the ADR-0004 hook is delivered via `--settings` (exec form), registered
+only on `WebFetch`, not `WebSearch`:** `claudeClient.ts` gained a `settings` option
+(`--settings <json>`) and an `extraEnv` option (extra env vars merged into the sanitized child
+env). `runDeepResearchAgent` uses these to register a `PostToolUse` hook
+(`src/agents/sourceCaptureHook.ts`'s `buildSourceCaptureHookSettings`) whose `command`/`args`
+point directly at `node_modules/.bin/tsx` and `scripts/hooks/captureSourceHook.ts` — the "exec
+form" documented in Claude Code's hooks reference, chosen over a shell-string `command` so
+absolute repo paths never need shell-quoting. The matcher is `"WebFetch"` only: confirmed
+against the hooks/tools reference (and empirically, in this phase's live smoke test) that
+`WebSearch`'s `tool_response` contains only result titles/URLs, never fetched page content —
+recording a search-result URL as a `sources` row would misrepresent it as something actually
+fetched when it wasn't. `--settings`-supplied hooks were confirmed (per the same reference) to
+fire even without a project `.claude/settings.json`, and this repo has none, so there's no
+merge-order ambiguity with a project-level hooks config to worry about yet.
+
+**Decision, part 2 — hook context travels via env vars, not IPC:** A hook fires as an
+independent OS process spawned by the `claude` binary itself, not a callback into this app's
+Node process, so it has no access to the in-memory `Db` handle already open in
+`researchHandler.ts`. `buildSourceCaptureHookEnv` passes `AOH_DB_PATH`/
+`AOH_RESEARCH_COMPANY_ID`/`AOH_RESEARCH_TASK_ID` as env vars (shared constants in
+`sourceCaptureHook.ts` so the two sides can't drift); the hook script opens its own short-lived
+`createDb(dbPath)` connection per invocation. This is also why `src/db/client.ts` gained a
+`busy_timeout = 5000` pragma this phase — multiple `WebFetch` calls in one research run can
+each spawn a hook process that opens the same SQLite file concurrently, which is a genuinely new
+scenario (ADR-0008 part 3's "single-writer local app" assumption no longer strictly holds for
+this one table).
+
+**Decision, part 3 — an evidence item's `sourceUrl` must match a hook-recorded `sources` row
+for that task, or it's dropped, not persisted:** This is the actual enforcement mechanism behind
+ADR-0004's stated principle ("the agent's own structured output is not trusted as the sole
+record of what was fetched"). `researchHandler.ts` looks up `sources` rows with
+`fetchedByTaskId = <this task>` and matches `evidence[].sourceUrl` against `sources.url`,
+tolerating only a trailing-slash difference (`urlsMatch`) — anything else (a URL only seen in a
+`WebSearch` result, a fabricated URL, a genuine typo) is silently excluded from what gets
+persisted, since `evidence_items.sourceId` is a required FK and provenance is structural per
+PLAN.md's Phase 5 acceptance criteria, not a soft preference. The count of dropped items is
+still surfaced (`droppedUnverifiedEvidenceCount` in the handler's return value, and a note on
+`companies.notes`) rather than silently swallowed, so a systematic mismatch is visible without
+failing the whole task over what could just be legitimate URL-normalization noise. This path was
+exercised for real, not just in fixtures, during this phase's live 8-company smoke test: 7 of 8
+companies had every cited `sourceUrl` match a real fetch (0 dropped), but one company ("Animal
+Hospital Southwest") had exactly 1 of 23 evidence items dropped — the mechanism catching a real
+cited URL that didn't correspond to any page the hook actually recorded as fetched during that
+task, which is precisely the scenario ADR-0004 exists to guard against.
+
+**Decision, part 4 — Deep Research uses the `"reasoning"` model tier:** Spec §52 groups "deep
+analysis" and "complex opportunity reasoning" under its more-capable-model column, and unlike
+Discovery/Pre-Screening (narrow classification tasks explicitly named under the cheaper tier),
+Deep Research has to dynamically decide what to investigate per company (spec §19) — the same
+judgment call the Phase 0 spike already made (`resolveModelAlias("reasoning")`, i.e. `sonnet`).
+
+**Decision, part 5 — the company transitions `RESEARCH_PENDING -> RESEARCHED` regardless of how
+much evidence survives, and an `ANALYZE` work item is always enqueued on success:** A thin or
+even zero-evidence result (every fetch failed, or every cited source was dropped) is itself a
+valid, expected outcome — spec §98 explicitly lists "insufficient evidence" as a scenario Phase
+6's agent must handle, not one Phase 5 should block on. `researchHandler.ts` enqueues `ANALYZE`
+unconditionally whenever the Claude call itself succeeds, following the same "each handler wires
+the next stage's queue" pattern as `discoverHandler.ts` (enqueues `PRESCREEN`) and
+`prescreenHandler.ts` (enqueues `RESEARCH`) — PLAN.md's Phase 5 "explicitly NOT built" scope
+covers the Opportunity Analysis *agent itself*, not queue wiring for it, and leaving researched
+companies without a queued next step would just recreate the same backlog Phase 4's completion
+doc avoided for Phase 5.
+
+**Decision, part 6 — candidate problems and an evidence-count summary are recorded in
+`companies.notes`, same convention as ADR-0010 part 7 / ADR-0011 part 4:** No dedicated schema
+column exists for `candidateProblems` (AGENT_CONTRACTS.md §3 calls it "raw material for the
+Opportunity Analysis Agent," which is free text, not a modeled entity). Appended as new lines
+rather than adding a column for one phase's-worth of free text, continuing the existing
+`companies.notes` audit-trail convention instead of diverging from it.
+
+**Decision, part 7 — `nextEligibleResearchAt` uses a new deterministic 90-day default window
+(`src/lib/researchFreshness.ts`), and `sources.freshnessState` uses a new deterministic 30-day
+default threshold (`src/lib/sourceFreshness.ts`):** Spec §60 and DATABASE_SCHEMA.md both
+explicitly leave these thresholds unspecified ("eventually configurable" / "the exact freshness
+thresholds should be configurable or decided during implementation planning"). Same category of
+placeholder as ADR-0008/0009's penalty values and timeouts — reasoned starting points, not
+empirically tuned, revisit once Phase 14 (re-research eligibility) or real usage says otherwise.
+`sourceFreshness.ts`'s `STALE` branch is written and unit-tested but unreachable from the one
+live call site today (a source is always `retrievedAt = now` at insert time, so it's always
+`FRESH` or `UNAVAILABLE` there) — same "implemented now, forward-looking" pattern as ADR-0011
+part 3, for whichever later phase recomputes freshness for an existing row on read.
+
+**Consequences:** Phase 6 (Opportunity Analysis) reads `evidence_items`/`sources` rows this
+phase produces and should treat a company with few/no evidence items as a legitimate "insufficient
+evidence" input, not an error state. Phase 14 (re-research eligibility, spec §60) is the natural
+place to revisit both freshness constants and to actually exercise `sourceFreshness.ts`'s `STALE`
+branch by recomputing freshness for existing rows on read.

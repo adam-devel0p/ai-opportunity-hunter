@@ -231,6 +231,60 @@ describe("invokeClaude", () => {
     expect(result.status).toBe("error");
   });
 
+  it("passes --settings <json> when settings is provided, and omits the flag otherwise", async () => {
+    const fakeChild = createFakeChild();
+    vi.mocked(spawn).mockReturnValue(fakeChild as never);
+
+    const resultPromise = invokeClaude({
+      prompt: "research this company",
+      model: "sonnet",
+      tools: ["WebFetch"],
+      settings: { hooks: { PostToolUse: [{ matcher: "WebFetch", hooks: [] }] } },
+    });
+    fakeChild.stdout.emit("data", Buffer.from(JSON.stringify({ result: "ok", is_error: false })));
+    fakeChild.emit("close", 0);
+    await resultPromise;
+
+    const args = vi.mocked(spawn).mock.calls[0]?.[1] as string[];
+    const flagIndex = args.indexOf("--settings");
+    expect(flagIndex).toBeGreaterThanOrEqual(0);
+    expect(JSON.parse(args[flagIndex + 1] as string)).toEqual({
+      hooks: { PostToolUse: [{ matcher: "WebFetch", hooks: [] }] },
+    });
+
+    vi.mocked(spawn).mockClear();
+    const secondPromise = invokeClaude({ prompt: "hi", model: "sonnet", tools: [] });
+    fakeChild.stdout.emit("data", Buffer.from(JSON.stringify({ result: "ok", is_error: false })));
+    fakeChild.emit("close", 0);
+    await secondPromise;
+    const secondArgs = vi.mocked(spawn).mock.calls[0]?.[1] as string[];
+    expect(secondArgs).not.toContain("--settings");
+  });
+
+  it("merges extraEnv into the spawned child's env, still stripping ANTHROPIC_API_KEY even if extraEnv sets it", async () => {
+    const fakeChild = createFakeChild();
+    vi.mocked(spawn).mockReturnValue(fakeChild as never);
+
+    const resultPromise = invokeClaude({
+      prompt: "hi",
+      model: "sonnet",
+      tools: [],
+      extraEnv: {
+        AOH_DB_PATH: "/tmp/aoh-test.db",
+        AOH_RESEARCH_TASK_ID: "wi-1",
+        ANTHROPIC_API_KEY: "sk-ant-should-be-stripped",
+      },
+    });
+    fakeChild.stdout.emit("data", Buffer.from(JSON.stringify({ result: "ok", is_error: false })));
+    fakeChild.emit("close", 0);
+    await resultPromise;
+
+    const spawnOptions = vi.mocked(spawn).mock.calls[0]?.[2] as { env?: NodeJS.ProcessEnv };
+    expect(spawnOptions.env?.AOH_DB_PATH).toBe("/tmp/aoh-test.db");
+    expect(spawnOptions.env?.AOH_RESEARCH_TASK_ID).toBe("wi-1");
+    expect(spawnOptions.env?.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
   it("resolves with status error if the CLI binary fails to spawn", async () => {
     const fakeChild = createFakeChild();
     vi.mocked(spawn).mockReturnValue(fakeChild as never);

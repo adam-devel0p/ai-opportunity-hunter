@@ -4,21 +4,24 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 4 (Pre-Screening Agent) — complete. See
-[phases/phase-4-prescreening-agent.md](phases/phase-4-prescreening-agent.md) for the full
+**Last updated:** Phase 5 (Deep Research Agent + evidence model) — complete. See
+[phases/phase-5-deep-research-agent.md](phases/phase-5-deep-research-agent.md) for the full
 writeup.
 
 ## Status
 
-Phases 0-4 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-5 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
 normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
 primitives (priority selection, lifecycle transition validation, failure classification, crash
 recovery), Phase 3's first real agent + live DB wiring (manually-configured discovery campaigns,
-the Discovery Agent, diversity-aware campaign selection, the `DISCOVER` task handler), and now
-Phase 4's second real agent: the Pre-Screening Agent + the `PRESCREEN` task handler that
-classifies a discovered company and either discards it or enqueues `RESEARCH` work. No worker
-loop, dashboard, or any agent past Pre-Screening yet — see PLAN.md Phase 5 onward.
+the Discovery Agent, diversity-aware campaign selection, the `DISCOVER` task handler), Phase 4's
+second real agent (the Pre-Screening Agent + the `PRESCREEN` task handler), and now Phase 5's
+third real agent: the Deep Research Agent + the `RESEARCH` task handler, which persists
+provenance-verified evidence and enqueues `ANALYZE` work, plus the ADR-0004 `PostToolUse`
+evidence-provenance hook (the first phase to need it — every `WebFetch` call is independently
+recorded as a `sources` row). No worker loop, dashboard, or any agent past Deep Research yet —
+see PLAN.md Phase 6 onward.
 
 ## Actual stack in use
 
@@ -64,9 +67,24 @@ src/
                                 hand-mirrored JSON Schema, prompt builder (fast model tier,
                                 `WebFetch`-only, ADR-0011 part 2), `runPrescreenAgent`.
     prescreenAgent.test.ts
+    deepResearchAgent.ts       Deep Research Agent (AGENT_CONTRACTS.md §3, Phase 5): Zod schema
+                                + hand-mirrored JSON Schema, prompt builder (bakes in spec §24's
+                                research integrity rules verbatim plus ADR-0012's additions),
+                                `runDeepResearchAgent` (reasoning model tier, WebSearch+WebFetch,
+                                registers the source-capture hook via `settings`/`extraEnv`).
+    deepResearchAgent.test.ts
+    sourceCaptureHook.ts       Shared logic for the ADR-0004 `PostToolUse` hook (Phase 5):
+                                `buildSourceCaptureHookSettings` (the `--settings` payload,
+                                exec-form command+args pointing at the hook script below),
+                                `buildSourceCaptureHookEnv` (env vars carrying DB path/company
+                                id/task id to the hook's separate OS process), and
+                                `extractWebFetchEvent` (parses a PostToolUse payload — used by
+                                both this module's settings builder and the hook script itself).
+    sourceCaptureHook.test.ts
     schemas/
       deepResearchSpike.ts    Draft Zod + JSON Schema pair for the spike script only —
-                               Phase 5 owns the real Deep Research Agent contract.
+                               superseded by deepResearchAgent.ts's real contract; kept only
+                               because scripts/spike-research.ts still imports it.
   config/
     models.ts                 Tier -> `--model` alias map (ADR-0006).
     models.test.ts
@@ -85,6 +103,16 @@ src/
                                  penalty catalog (ADR-0008), raw/adjusted score calculation.
                                  Not wired to real opportunities yet (Phase 6 does that).
     scoring.test.ts
+    sourceFreshness.ts          `computeSourceFreshnessState` (spec §23, Phase 5) — deterministic
+                                 `sources.freshnessState` derivation: `UNAVAILABLE` for a
+                                 non-2xx/missing HTTP status, else `FRESH`/`STALE` by a
+                                 configurable age threshold (default 30 days, ADR-0012 part 7).
+    sourceFreshness.test.ts
+    researchFreshness.ts        `computeNextEligibleResearchAt` (spec §60, Phase 5) —
+                                 deterministic `companies.nextEligibleResearchAt` derivation
+                                 (default 90-day window, ADR-0012 part 7), set by
+                                 `researchHandler.ts` on every successful research run.
+    researchFreshness.test.ts
     campaigns.ts                 `discovery_campaigns` CRUD (Phase 3, spec §15): create/list/
                                   get, and operator status toggles (enable/pause/disable/
                                   blacklist — freely reversible, no state-machine restriction)
@@ -138,6 +166,23 @@ src/
                                   (ADR-0011 part 4). Quota exhaustion/other failures handled the
                                   same way as `discoverHandler.ts`.
     prescreenHandler.test.ts
+    researchHandler.ts           `runResearchTask` (Phase 5) — the third live-DB-wired task
+                                  handler: loads the company a `RESEARCH` work item targets
+                                  (`entityId` is a company id, same convention as `PRESCREEN`),
+                                  runs the Deep Research Agent, and persists only the evidence
+                                  items whose `sourceUrl` matches a `sources` row the ADR-0004
+                                  hook actually recorded for this task (ADR-0012 part 3) —
+                                  everything else is dropped, not persisted, with the drop count
+                                  surfaced in both the handler's return value and
+                                  `companies.notes`. On success: company transitions
+                                  `RESEARCH_PENDING -> RESEARCHED` unconditionally (even with
+                                  zero surviving evidence, ADR-0012 part 5), `lastResearchedAt`/
+                                  `nextEligibleResearchAt` are set via `researchFreshness.ts`,
+                                  candidate problems are appended to `companies.notes`, and an
+                                  `ANALYZE` work item is enqueued. Quota exhaustion/other
+                                  failures handled the same way as `discoverHandler.ts`/
+                                  `prescreenHandler.ts`.
+    researchHandler.test.ts
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
@@ -151,6 +196,17 @@ scripts/
                                  (Phase 4's manual smoke-test entry point). `npm run prescreen --
                                  --company <id>` for one, or `--all [--limit <n>]` for every
                                  PENDING PRESCREEN item.
+  research.ts                    Runs real RESEARCH work items against the live `claude` CLI
+                                 (Phase 5's manual smoke-test entry point). `npm run research --
+                                 --company <id>` for one, or `--all [--limit <n>]` for every
+                                 PENDING RESEARCH item.
+  hooks/
+    captureSourceHook.ts          The ADR-0004 `PostToolUse` hook subprocess entry point (Phase
+                                  5) — spawned directly by the `claude` CLI (via `--settings`,
+                                  see `src/agents/sourceCaptureHook.ts`), not by this app's own
+                                  Node process. Exports a testable `runCaptureSourceHook(...)`
+                                  core; `main()` is a thin stdin/env/real-DB shell around it.
+    captureSourceHook.test.ts
   db/
     migrate.ts                  `npm run db:migrate` — applies pending migrations to
                                  `AOH_DB_PATH` (default `./data/aoh.db`).
@@ -164,16 +220,17 @@ docs/
     phase-2-work-queue.md      Phase 2 completion doc.
     phase-3-discovery-agent.md Phase 3 completion doc.
     phase-4-prescreening-agent.md Phase 4 completion doc.
+    phase-5-deep-research-agent.md Phase 5 completion doc.
 ```
 
 Nothing under `src/app` or `src/worker.ts` exists yet — those are Phase 11+ (see PLAN.md's
-target layout for what's still to come). No dashboard and no agent past Pre-Screening exist yet.
+target layout for what's still to come). No dashboard and no agent past Deep Research exist yet.
 Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts`/
-`prescreenHandler.ts` are still deterministic primitives only (pure functions over plain
-objects/arrays), not wired to `work_items` reads/writes — that wiring happens incrementally as
-each later phase's agent handler is built (Phase 5 onward) and finally in Phase 11's `worker.ts`
-loop, which is also what will actually run `campaignSelection.ts` autonomously instead of the
-operator picking a campaign by id via `scripts/discover.ts`.
+`prescreenHandler.ts`/`researchHandler.ts` are still deterministic primitives only (pure
+functions over plain objects/arrays), not wired to `work_items` reads/writes — that wiring
+happens incrementally as each later phase's agent handler is built (Phase 6 onward) and finally
+in Phase 11's `worker.ts` loop, which is also what will actually run `campaignSelection.ts`
+autonomously instead of the operator picking a campaign by id via `scripts/discover.ts`.
 
 ## `src/agents/claudeClient.ts`
 
@@ -189,8 +246,14 @@ Exports:
   - `--json-schema <json>` when the caller passes `jsonSchema` — confirmed to constrain the
     `result` field to schema-conformant JSON even for tool-using calls (ADR-0007). Not a
     substitute for Zod validation of the parsed result.
-  - an explicit `env` built by `buildSanitizedEnv()`, which clones `process.env` and deletes
-    `ANTHROPIC_API_KEY` — never inherited, regardless of what the parent shell has set.
+  - `--settings <json>` when the caller passes `settings` (Phase 5, ADR-0012 part 1) — used by
+    the Deep Research Agent to register the ADR-0004 `PostToolUse` source-capture hook. Omitted
+    entirely for every other agent (no call site needs it yet).
+  - an explicit `env` built by `buildSanitizedEnv()` merged with any caller-supplied `extraEnv`
+    (Phase 5 — context a `--settings`-registered hook subprocess needs, since it can't share
+    in-memory state with this process), which clones `process.env` and deletes
+    `ANTHROPIC_API_KEY` — never inherited, regardless of what the parent shell or `extraEnv` has
+    set (stripped a second time after merging `extraEnv`, defensively).
   - `warnIfApiKeyPresent()` logs a loud console warning (not an error — this app's own calls
     are safe either way) if the *parent* environment has `ANTHROPIC_API_KEY` set, since that's
     a latent foot-gun for other tools run from the same shell (ADR-0001).
@@ -205,10 +268,8 @@ Exports:
   a documented API — expect to add patterns here as real exhaustion messages are observed in
   practice (see ADR-0001's "Consequences").
 
-Not yet built (later phases' responsibility): the one-retry-with-validation-error-appended
-loop, `work_items`/`prompt_versions` logging (the DB now exists as of Phase 1, but nothing
-wires `claudeClient` to it yet — that's Phase 2/3's job), the ADR-0004 `PostToolUse` Source-row
-hook (likely wired in whichever phase first does research with persistence — Phase 5).
+Not yet built (later phases' responsibility): `work_items`/`prompt_versions` logging (the DB now
+exists as of Phase 1, but nothing wires `claudeClient` to it yet).
 
 ## `src/db/` (Phase 1)
 
@@ -251,6 +312,15 @@ hook (likely wired in whichever phase first does research with persistence — P
   (adjusted score clamped to `[0, 100]`, per DATABASE_SCHEMA.md), and `scoreOpportunity` tying
   all three together. Not wired to real `opportunity_evaluations` rows yet — Phase 6 does that;
   Phase 1 only guarantees the arithmetic itself is correct and tested.
+- `sourceFreshness.ts` (Phase 5) — `computeSourceFreshnessState` per spec §23:
+  `UNAVAILABLE` for a missing/non-2xx HTTP status, else `FRESH`/`STALE` by
+  `DEFAULT_SOURCE_FRESHNESS_THRESHOLD_MS` (30 days, ADR-0012 part 7). The one live call site
+  (the hook, at insert time) only ever exercises `FRESH`/`UNAVAILABLE`; `STALE` is
+  unit-tested but unreachable until a later phase recomputes freshness for an existing row.
+- `researchFreshness.ts` (Phase 5) — `computeNextEligibleResearchAt` per spec §60:
+  adds `DEFAULT_RESEARCH_FRESHNESS_WINDOW_MS` (90 days, ADR-0012 part 7) to `now`. Set on
+  `companies.nextEligibleResearchAt` by `researchHandler.ts` after every successful research
+  run; consumed by `prescreenHandler.ts`'s freshness short-circuit (ADR-0011 part 3).
 
 ## `src/pipeline/` (Phase 2)
 
@@ -330,25 +400,46 @@ full reasoning:
   as a billing-safety check anywhere in this codebase; the operator's claude.ai/console usage
   page is the only real signal (see ADR-0001's verification history).
 
+## Claude CLI hook findings (Phase 5)
+
+Confirmed against Claude Code's hooks reference and empirically in this phase's live smoke test
+(see ADR-0012):
+
+- A `PostToolUse` hook fires *after* the tool call already completed — it cannot block, retry,
+  or alter the underlying `WebFetch`/`WebSearch` call itself, only annotate/replace what Claude
+  sees about it afterward (which this app doesn't use). Its only real use here is the side
+  effect: writing a `sources` row.
+- Hooks registered via `--settings <json>` (as opposed to a project `.claude/settings.json`) do
+  fire in `-p`/headless mode, including the "exec form" (`command` + `args`, no shell) used here.
+- `WebFetch`'s `tool_response` is the *small model's extracted answer* to the fetch's own
+  prompt, not the raw page — there is no `title` field anywhere in it. The hook therefore never
+  populates `sources.title`; it's left null (schema already allows this).
+- A cross-host redirect produces **two** separate `PostToolUse` events (one for the original
+  URL, one for the followed URL) rather than one — confirmed both in the docs and in this
+  phase's live run. The hook records both as independent `sources` rows; this is intentional
+  (each represents a real fetch), not a bug.
+- `WebSearch`'s `tool_response` contains only result titles/URLs, never fetched page content —
+  confirmed both in the docs and by inspecting real `WebSearch` calls in this phase's live run.
+  This is why the hook matcher is `"WebFetch"` only (ADR-0012 part 1).
+
 ## Known limitations
 
-- No Source-row provenance hook (ADR-0004) yet — the `sources` table exists but nothing
-  populates it outside of the Phase 1 round-trip test; that's Phase 5. Discovery doesn't need
-  it (it doesn't produce evidence_items), so this wasn't pulled forward into Phase 3.
 - `scripts/spike-research.ts` is intentionally throwaway: no persistence, no retry, draft
-  schema only. Do not import it from real agent code in later phases — Phase 5 builds the real
-  Deep Research Agent from scratch against the finalized contract.
+  schema only, and now superseded by `src/agents/deepResearchAgent.ts`'s real contract. Do not
+  import it from real agent code.
 - `src/pipeline/stateMachine.ts`, `priority.ts`, `failureClassification.ts`, and
   `crashRecovery.ts` are still pure primitives with no live-DB wiring of their own beyond what
-  `discoverHandler.ts` (`DISCOVER`) and `prescreenHandler.ts` (`PRESCREEN`) call directly. Phase
-  5 onward wires the rest incrementally; Phase 11's `worker.ts` is what runs `crashRecovery` at
-  startup and drives the main loop instead of the operator invoking `scripts/discover.ts`/
-  `scripts/prescreen.ts` by hand.
-- `RESEARCH` work items now exist in the live DB (created by `prescreenHandler.ts` on `MAYBE`/
-  `PROMISING`) but nothing consumes them yet — Phase 5's Deep Research Agent is the first
-  handler that will pick them up. The 8 real companies from Phase 3's manual smoke test are all
-  sitting `RESEARCH_PENDING` with a `PENDING` `RESEARCH` work item as of Phase 4's own manual
-  smoke test, ready for Phase 5 to exercise without needing a fresh discovery/prescreen run.
+  `discoverHandler.ts` (`DISCOVER`), `prescreenHandler.ts` (`PRESCREEN`), and
+  `researchHandler.ts` (`RESEARCH`) call directly. Phase 6 onward wires the rest incrementally;
+  Phase 11's `worker.ts` is what runs `crashRecovery` at startup and drives the main loop instead
+  of the operator invoking `scripts/discover.ts`/`scripts/prescreen.ts`/`scripts/research.ts` by
+  hand.
+- `ANALYZE` work items now exist in the live DB (created by `researchHandler.ts` on every
+  successful research run) but nothing consumes them yet — Phase 6's Opportunity Analysis Agent
+  is the first handler that will pick them up. The 8 real companies from Phases 3-4's manual
+  smoke tests are all `RESEARCHED` with a `PENDING` `ANALYZE` work item as of Phase 5's own
+  manual smoke test, ready for Phase 6 to exercise without needing a fresh
+  discovery/prescreen/research run.
 - `src/pipeline/failureClassification.ts`'s pattern lists (transient vs. permanent error text)
   are a reasoned starting point, not exhaustive — Phase 3's live discovery runs didn't exercise
   the failure path (both real runs succeeded), so these patterns are still unvalidated against
@@ -369,7 +460,17 @@ full reasoning:
   any code path — Phase 3 kept discovery volume as a code constant/CLI flag instead of building
   a general config-accessor layer for one setting (ADR-0010 part 8), and prompt-template
   versioning has no per-call log to link against yet (ADR-0010 part 9).
-- `companies.notes` is now used for two purposes: genuine operator notes, and (as of Phase 3)
-  a seeded `"Discovery reason: ..."` string from the Discovery Agent's `reasonToScreen` output,
-  since there's no dedicated schema column for it (ADR-0010 part 7). Revisit if a later phase
-  (e.g. the Phase 12 dashboard) needs to distinguish the two.
+- `companies.notes` is now used for several purposes: genuine operator notes, a seeded
+  `"Discovery reason: ..."` string (Phase 3, ADR-0010 part 7), a `"Prescreen (...): ..."` line
+  (Phase 4, ADR-0011 part 4), and now (Phase 5) a `"Research: N evidence item(s) recorded..."`
+  summary plus a `"Research candidate problems: ..."` line — none have a dedicated schema column
+  (ADR-0012 part 6). Revisit if a later phase (e.g. the Phase 12 dashboard) needs these
+  distinguished as structured fields rather than one free-text audit trail.
+- The evidence-provenance cross-check (ADR-0012 part 3: an evidence item's `sourceUrl` must
+  match a hook-recorded `sources` row for that task) was exercised for real in this phase's live
+  8-company smoke test, not just in fixtures: 1 of 23 evidence items for one company ("Animal
+  Hospital Southwest") was dropped because its cited `sourceUrl` didn't match any page the hook
+  recorded as fetched — the exact scenario ADR-0004 exists to guard against, caught live.
+- `sources.title` is always null (Phase 5) — `WebFetch`'s `tool_response` never includes a page
+  title (see "Claude CLI hook findings" above), only its extracted-answer text. Getting a real
+  title would need a separate fetch mechanism (e.g. `curl` via Bash); not pursued this phase.
