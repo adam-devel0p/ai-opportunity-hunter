@@ -255,9 +255,19 @@ agent, ADR-0016 part 5).
 
 ## 8. Outreach Writer (Phase 10)
 
-**Input:** opportunity + offer + contact. 60-130 words (spec §39), enforced by a
-deterministic post-generation check that regenerates on violation rather than trusting the
-model's word count.
+**Input** (as actually implemented, `src/agents/outreachAgent.ts`): the opportunity's
+recipient-facing content only (`problemTitle`/`problemDescription`/`proposedSolution`/
+`affectedRole` — deliberately no score, confidence, or penalty reasons, since those are internal
+pipeline judgments, not something a recipient should ever see echoed back), the offer's
+`scope`/`expectedOutcome`/`demoConcept`, the contact's `name`/`role`/
+`isPreferredForInitialOutreach` (from `src/lib/contactDisplay.ts`, never the raw
+`emailConfidence` enum — spec §38), and the opportunity's linked evidence (`claim` +
+`classification`, for grounding and for the truthfulness check below) — only reachable via a
+`WRITE_OUTREACH` work item, which `contactHandler.ts` enqueues unconditionally on every completed
+contact search, so this agent is never invoked for an opportunity that hasn't already survived
+Skeptical Verification and gotten both a priced offer and a contact. Uses the `"reasoning"` model
+tier (ADR-0017 part 1: writing/judgment over already-gathered material, same reasoning as Offer
+Builder) and no tools.
 
 **Output:**
 ```ts
@@ -266,11 +276,36 @@ z.object({
   body: z.string(),
 })
 ```
-Deterministic post-checks (spec §40): banned marketing-phrase list, word count range, and a
-truthfulness heuristic (any sentence implying certainty — "you spend hours on X" — must trace
-to a FACT-classified evidence item, not just an INFERENCE/HYPOTHESIS one; hedged phrasing
-like "if... is still done manually" is required when the underlying evidence is only
-INFERENCE/HYPOTHESIS).
+
+**Post-generation deterministic checks (`src/lib/outreachLint.ts`, run by
+`src/pipeline/outreachHandler.ts`):**
+- **Word count** (spec §39): the body must be 60-130 words.
+- **Banned-phrase blocklist** (spec §39): spec's own exaggerated-marketing examples
+  ("revolutionary AI solution", "transform your business with cutting-edge AI", "unlock the
+  power of AI") plus close variants, and a small set of generic-mass-email openers ("Dear
+  Sir/Madam", "To Whom It May Concern").
+- **Truthfulness heuristic** (spec §40, ADR-0017 part 3): a structural approximation, not real
+  claim-to-evidence tracing — any sentence matching a confident-assertion pattern modeled on spec
+  §40's own bad example ("I noticed your team spends hours doing X") with no hedge word in the
+  same sentence (modeled on spec §40's own good example's "if... is still being done manually, I
+  think there may be...") fails the check, but only when the opportunity's evidence contains no
+  FACT-classified item at all — if even one FACT exists, unhedged confident phrasing is allowed
+  through.
+
+A match on any check triggers exactly one regeneration (a second Claude call with every failing
+reason appended as feedback, same "one regeneration then fail" pattern as `offerHandler.ts`'s
+vague-offer lint, ADR-0015 part 3); a second consecutive failure fails the work item without
+persisting a draft.
+
+The agent signs off with a literal `"[Your name]"` placeholder rather than a configured operator
+name (ADR-0017 part 4 — no such config exists yet, and the operator edits every draft before
+sending regardless, per spec §41).
+
+On success, exactly one `outreach_drafts` row is persisted at `status: "DRAFT"`. Unlike every
+earlier stage, this handler does **not** transition `opportunities.status` and enqueues no
+further work item (ADR-0017 part 5) — `OUTREACH_READY -> SENT` only happens when the operator
+actually sends the email (spec §41/§45, a manual action, Phase 12/13 territory), never
+automatically on draft generation. This is the last automated pipeline stage.
 
 ## Cross-cutting rules for every agent
 

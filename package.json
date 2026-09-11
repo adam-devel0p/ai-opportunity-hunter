@@ -21,7 +21,8 @@
     "analyze": "tsx scripts/analyze.ts",
     "verify": "tsx scripts/verify.ts",
     "offer": "tsx scripts/offer.ts",
-    "contact": "tsx scripts/contact.ts"
+    "contact": "tsx scripts/contact.ts",
+    "outreach": "tsx scripts/outreach.ts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

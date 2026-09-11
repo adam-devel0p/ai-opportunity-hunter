@@ -4,9 +4,8 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 9 (Contact Research Agent) — complete. See
-[phases/phase-9-contact-research-agent.md](phases/phase-9-contact-research-agent.md) for the full
-writeup.
+**Last updated:** Phase 10 (Outreach Writer) — complete. See
+[phases/phase-10-outreach-writer.md](phases/phase-10-outreach-writer.md) for the full writeup.
 
 ## Status
 
@@ -29,12 +28,17 @@ score threshold, evidence-strength floor, risk-category classification — to de
 to enqueue `BUILD_OFFER` work), Phase 8's sixth real agent (the Offer Builder + the `BUILD_OFFER`
 task handler, which turns a gated `VERIFIED` opportunity into a concrete, priced `offers` row —
 the first phase to enforce spec §34's vague-offer lint and spec §35's pricing bands, both
-deterministic), and now Phase 9's seventh real agent: the Contact Research Agent + the
+deterministic), Phase 9's seventh real agent (the Contact Research Agent + the
 `FIND_CONTACT` task handler, which finds the real person most likely to own a gated opportunity's
 problem and persists a `contacts` row — the first phase to enforce spec §38's "never represent a
 guessed email as verified" hard rule at a dedicated data-access layer
-(`src/lib/contactDisplay.ts`) rather than trusting a future dashboard to check it correctly. No
-worker loop or dashboard yet, and no agent past Contact Research — see PLAN.md Phase 10 onward.
+(`src/lib/contactDisplay.ts`) rather than trusting a future dashboard to check it correctly), and
+now Phase 10's eighth and final pipeline agent: the Outreach Writer + the `WRITE_OUTREACH` task
+handler, which writes one honest cold-outreach draft per verified opportunity with an offer and a
+contact, and persists an `outreach_drafts` row — the first handler that deliberately does NOT
+transition the opportunity's lifecycle status or enqueue further work, since actually sending mail
+is a manual operator action (spec §41), not something this pipeline does. No worker loop or
+dashboard yet — see PLAN.md Phase 11 onward.
 
 ## Actual stack in use
 
@@ -129,6 +133,15 @@ src/
                                  verbatim), `runContactAgent` (fast model tier, WebSearch+WebFetch
                                  tools — ADR-0016 part 1).
     contactAgent.test.ts
+    outreachAgent.ts            Outreach Writer (AGENT_CONTRACTS.md §8, Phase 10): Zod schema
+                                 (`{ subject, body }`) + hand-mirrored JSON Schema, prompt builder
+                                 (embeds spec §39's style rules and spec §40's bad/good
+                                 truthfulness examples verbatim, signs off with a literal
+                                 "[Your name]" placeholder — ADR-0017 part 4), `runOutreachAgent`
+                                 (reasoning model tier, no tools). Supports a `regenerationReason`
+                                 input distinct from the schema-validation retry, used by the
+                                 handler's deterministic-lint regeneration (ADR-0017 part 2).
+    outreachAgent.test.ts
     schemas/
       deepResearchSpike.ts    Draft Zod + JSON Schema pair for the spike script only —
                                superseded by deepResearchAgent.ts's real contract; kept only
@@ -210,6 +223,17 @@ src/
                                    the dashboard) should build on it instead of re-deriving the
                                    check.
     contactDisplay.test.ts
+    outreachLint.ts               `lintOutreachDraft` (spec §39-40, Phase 10) — three independent
+                                   deterministic checks (`checkOutreachWordCount`,
+                                   `checkOutreachBannedPhrases`, `checkOutreachTruthfulness`),
+                                   combined and aggregating every failing reason at once (ADR-0017
+                                   part 2, unlike `offerLint.ts`'s short-circuit-on-first-match).
+                                   The truthfulness check is a structural approximation, not real
+                                   claim-to-evidence tracing (ADR-0017 part 3): an unhedged
+                                   confident-assertion sentence only fails the check when the
+                                   opportunity has zero FACT-classified evidence at all.
+                                   `outreachHandler.ts` is the only caller.
+    outreachLint.test.ts
     campaigns.ts                 `discovery_campaigns` CRUD (Phase 3, spec §15): create/list/
                                   get, and operator status toggles (enable/pause/disable/
                                   blacklist — freely reversible, no state-machine restriction)
@@ -362,6 +386,26 @@ src/
                                      exhaustion/other failures handled the same way as every
                                      earlier handler.
     contactHandler.test.ts
+    outreachHandler.ts              `runWriteOutreachTask` (Phase 10) — the eighth and final
+                                     live-DB-wired handler of the core pipeline: loads the
+                                     opportunity a `WRITE_OUTREACH` item targets (`entityId` is an
+                                     opportunity id, same convention as `VERIFY`/`BUILD_OFFER`/
+                                     `FIND_CONTACT` — set by `contactHandler.ts`), its `offers`
+                                     row, its linked evidence, and the company's most recent
+                                     `contacts` row (looked up by `companyId` + `createdAt desc`,
+                                     since `contacts` has no direct opportunity link — ADR-0017
+                                     part 6), runs the Outreach Writer, and runs
+                                     `src/lib/outreachLint.ts`'s three checks on the result (a
+                                     match regenerates once, a second match fails the task without
+                                     persisting a draft — same pattern as `offerHandler.ts`'s
+                                     vague-offer lint). On success, persists one `outreach_drafts`
+                                     row at `status: "DRAFT"` and appends a summary to
+                                     `companies.notes` — but, unlike every earlier handler, does
+                                     NOT transition `opportunities.status` and enqueues no further
+                                     work item (ADR-0017 part 5): sending is a manual operator
+                                     action, not this handler's job. Quota exhaustion/other
+                                     failures handled the same way as every earlier handler.
+    outreachHandler.test.ts
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
@@ -400,6 +444,14 @@ scripts/
                                  ADR-0016 part 6 (same blocker as ADR-0015 part 5: no VERIFIED
                                  opportunity has ever existed to carry through to CONTACT_RESEARCH;
                                  fixture tests cover the acceptance criteria instead).
+  outreach.ts                    Runs real WRITE_OUTREACH work items against the live `claude` CLI
+                                 (Phase 10's manual smoke-test entry point). `npm run outreach --
+                                 --opportunity <id>` for one, or `--all [--limit <n>]` for every
+                                 PENDING WRITE_OUTREACH item; prints the generated subject/body.
+                                 Not yet exercised live this phase — see ADR-0017 part 7 (same
+                                 blocker as ADR-0015/0016: no opportunity has ever reached
+                                 OUTREACH_READY; fixture tests cover the acceptance criteria
+                                 instead).
   hooks/
     captureSourceHook.ts          The ADR-0004 `PostToolUse` hook subprocess entry point (Phase
                                   5) — spawned directly by the `claude` CLI (via `--settings`,
@@ -427,17 +479,20 @@ docs/
     phase-7-skeptic-verification-agent.md Phase 7 completion doc.
     phase-8-offer-builder.md   Phase 8 completion doc.
     phase-9-contact-research-agent.md Phase 9 completion doc.
+    phase-10-outreach-writer.md Phase 10 completion doc.
 ```
 
 Nothing under `src/app` or `src/worker.ts` exists yet — those are Phase 11+ (see PLAN.md's
-target layout for what's still to come). No dashboard and no agent past Contact Research exist
-yet. Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts`/
-`prescreenHandler.ts`/`researchHandler.ts`/`analyzeHandler.ts`/`verifyHandler.ts`/`offerHandler.ts`/
-`contactHandler.ts` are still deterministic primitives only (pure functions over plain
-objects/arrays), not wired to `work_items` reads/writes — that wiring happens incrementally as
-each later phase's agent handler is built (Phase 10 onward) and finally in Phase 11's `worker.ts`
-loop, which is also what will actually run `campaignSelection.ts` autonomously instead of the
-operator picking a campaign by id via `scripts/discover.ts`.
+target layout for what's still to come). No dashboard exists yet, and Phase 10's Outreach Writer
+is the last agent in the core pipeline (Phase 11 onward builds the worker loop and dashboard, not
+new agents, until Phase 13's feedback loop). Phase 2's `src/pipeline/` modules besides
+`campaignSelection.ts`/`discoverHandler.ts`/`prescreenHandler.ts`/`researchHandler.ts`/
+`analyzeHandler.ts`/`verifyHandler.ts`/`offerHandler.ts`/`contactHandler.ts`/`outreachHandler.ts`
+are still deterministic primitives only (pure functions over plain objects/arrays), not wired to
+`work_items` reads/writes — that wiring happens incrementally as each later phase's agent handler
+is built and finally in Phase 11's `worker.ts` loop, which is also what will actually run
+`campaignSelection.ts` autonomously instead of the operator picking a campaign by id via
+`scripts/discover.ts`.
 
 ## `src/agents/claudeClient.ts`
 
@@ -728,6 +783,30 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   open item flagged since ADR-0010 part 7.
 - `src/lib/contactDisplay.ts`'s `getContactDisplay` has no live caller yet beyond its own tests —
   `contactHandler.ts` uses the pure `toContactDisplay` directly on the row it just inserted, since
-  it already has that row in hand; `getContactDisplay`'s DB-read form is forward-looking, for
-  whichever later phase (Outreach Writer, the dashboard) first needs to look up a contact's
-  display-safe representation by id alone.
+  it already has that row in hand. `outreachHandler.ts` (Phase 10) also uses `toContactDisplay`
+  directly on a freshly-queried row rather than `getContactDisplay`, same reasoning; the DB-read
+  form remains forward-looking for the Phase 12 dashboard.
+- `companies.notes` now carries a ninth kind of content (Phase 10's `"Outreach: ..."` line) — same
+  open item flagged since ADR-0010 part 7.
+- Phase 10's `scripts/outreach.ts` has not been run against the real `claude` CLI — same blocker
+  as Phase 8/9 (ADR-0017 part 7): no opportunity has ever reached `OUTREACH_READY` in the live DB.
+  Whichever session first carries a fresh company all the way through the pipeline should run
+  `npm run outreach -- --opportunity <id>` and read the draft against spec §87's stated qualities
+  (specific, truthful, short, human, low pressure, problem-focused, not AI-hype) before trusting
+  this phase's prompt/lint design.
+- `src/lib/outreachLint.ts`'s truthfulness heuristic (Phase 10) is a keyword/sentence-pattern
+  approximation, not real claim-to-evidence tracing (ADR-0017 part 3) — same category as
+  `riskCategory.ts` (ADR-0014 part 4): it will miss confident phrasing it has no pattern for, and
+  only checks "does any FACT exist at all," not "does a FACT support *this* sentence." Expect to
+  extend its pattern lists once real drafts are checked against it.
+- `outreachHandler.ts` (Phase 10) is the first handler that does not transition
+  `opportunities.status` or enqueue a further work item on success (ADR-0017 part 5) — this is
+  intentional (sending is a manual operator action), but means `OUTREACH_READY -> SENT` and
+  `outreach_outcomes` recording have no code path at all yet; that's Phase 12 (dashboard action)
+  and Phase 13 (outcome analytics) territory.
+- `contacts` has no `opportunityId` column, so `outreachHandler.ts` looks up "the most recent
+  contact row for this opportunity's company" by `createdAt desc` rather than a direct join
+  (ADR-0017 part 6) — correct today because Phase 9 inserts exactly one contact immediately
+  before enqueueing the `WRITE_OUTREACH` item that leads here, but would need a real FK if a
+  future phase ever lets a company accumulate multiple concurrent in-flight opportunities each
+  with their own contact.

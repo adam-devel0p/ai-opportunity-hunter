@@ -16,14 +16,14 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 7 | Skeptical Verification Agent + gating | ✅ | [phase-7-skeptic-verification-agent.md](phases/phase-7-skeptic-verification-agent.md) |
 | 8 | Offer Builder + pricing | ✅ | [phase-8-offer-builder.md](phases/phase-8-offer-builder.md) |
 | 9 | Contact Research Agent | ✅ | [phase-9-contact-research-agent.md](phases/phase-9-contact-research-agent.md) |
-| 10 | Outreach Writer | ⬜ | — |
+| 10 | Outreach Writer | ✅ | [phase-10-outreach-writer.md](phases/phase-10-outreach-writer.md) |
 | 11 | Autonomous scheduler/worker | ⬜ | — |
 | 12 | Dashboard MVP | ⬜ | — |
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 10 — Outreach Writer
-**Next phase:** 11 — Autonomous scheduler/worker
+**Current phase:** 11 — Autonomous scheduler/worker
+**Next phase:** 12 — Dashboard MVP
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -172,6 +172,32 @@ criteria's fixture/unit tests (`contactAgent.test.ts`, `contactDisplay.test.ts`,
 the judgment calls made (model tier/tools choice, the email/emailConfidence schema coupling, the
 no-named-individual-found design, `contactDisplay.ts` as the enforced data-access layer, the
 single-write status collapse + `WRITE_OUTREACH` enqueue, and the deferred live smoke test).
+
+Phase 10 added the eighth and final agent of the core research-to-outreach pipeline: the
+Outreach Writer (`src/agents/outreachAgent.ts`, reasoning model tier, no tools) and the
+`WRITE_OUTREACH` work-item handler (`src/pipeline/outreachHandler.ts`) — reachable only via a
+`WRITE_OUTREACH` work item, which `contactHandler.ts` enqueues unconditionally on every completed
+contact search, so every draft this handler writes is for an opportunity that already survived
+Skeptical Verification and has both a priced offer and a researched contact. A new
+`src/lib/outreachLint.ts` enforces spec §39-40's deterministic post-generation checks — word
+count (60-130 words), a banned-marketing-phrase/generic-mass-email blocklist, and a truthfulness
+heuristic tying unhedged confident phrasing to the presence of at least one FACT-classified
+evidence item — with a match triggering exactly one regeneration before the task fails outright
+(same "one regeneration then fail" pattern as Phase 8's vague-offer lint). Every completed
+`WRITE_OUTREACH` task persists exactly one `outreach_drafts` row at `status: "DRAFT"`; unlike
+every earlier handler, this one does **not** transition `opportunities.status` or enqueue further
+work — `OUTREACH_READY -> SENT` is reserved for an actual manual operator send (spec §41/§45),
+not automatic draft generation, so this is intentionally the last automated pipeline stage. No
+live manual smoke test this phase — same blocker as Phases 8-9: all 8 real veterinary-clinic
+opportunities from Phases 3-7 remain `VERIFIER_REJECTED`, so there was no live `OUTREACH_READY`
+opportunity to run `scripts/outreach.ts` against; PLAN.md's Phase 10 acceptance criteria's
+fixture/unit tests (`outreachAgent.test.ts`, `outreachLint.test.ts`, `outreachHandler.test.ts`)
+cover the acceptance criteria instead. See
+[phase-10-outreach-writer.md](phases/phase-10-outreach-writer.md) and new ADR-0017 for the
+judgment calls made (model tier/no tools, the three independent deterministic-check modules and
+their "collect every reason" aggregation, the truthfulness heuristic's structural-approximation
+design, the `"[Your name]"` sign-off placeholder, the deliberate no-status-transition/no-enqueue
+behavior, the company-keyed contact lookup, and the deferred live smoke test).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

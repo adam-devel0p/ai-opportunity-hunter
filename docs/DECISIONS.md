@@ -942,3 +942,97 @@ exists, the Phase 10 equivalent) at least once and spot-check the result, same "
 behavior once real data exists" pattern flagged since ADR-0015 part 5.
 
 ---
+
+## ADR-0017: Phase 10 (Outreach Writer) judgment calls
+
+**Status:** Accepted (Phase 10).
+
+**Decision, part 1 — Outreach Writer uses the `"reasoning"` model tier, no tools:** Same
+reasoning as Offer Builder (ADR-0015) and Skeptical Verification (ADR-0014): writing a
+persuasive-but-honest email from already-gathered opportunity/offer/contact content is judgment
+over existing material, not a fetch/search task. `runOutreachAgent` defaults to
+`resolveModelAlias("reasoning")` (currently `sonnet`) with `tools: []`.
+
+**Decision, part 2 — spec §39-40's post-generation checks are implemented as three independent
+deterministic functions in a new `src/lib/outreachLint.ts`, combined by `lintOutreachDraft`, not
+folded into the handler inline:** Same shape as `offerLint.ts` (ADR-0015 part 3) — word count
+(60-130 words, spec §39), a banned-phrase blocklist (spec §39's exact examples —
+"revolutionary AI solution", "transform your business with cutting-edge AI", "unlock the power of
+AI" — plus close variants, and a small set of generic-mass-email openers), and a truthfulness
+heuristic (spec §40). Each is independently unit-tested; `lintOutreachDraft` aggregates every
+failing reason, not just the first, mirroring `opportunityGate.ts`'s "collect every failing
+reason" pattern (ADR-0014 part 2) rather than `offerLint.ts`'s short-circuit-on-first-match, since
+a regeneration prompt benefits from seeing all the problems at once, not just one at a time.
+
+**Decision, part 3 — the truthfulness heuristic is a structural approximation, not real
+claim-to-evidence tracing:** AGENT_CONTRACTS.md/PLAN.md's Phase 10 section describes the
+truthfulness check as tying "confident-sounding phrasing" to FACT-classified evidence, but linking
+a *specific* sentence to a *specific* evidence item deterministically (without an LLM judge, which
+would defeat the point of a deterministic check) isn't achievable with pattern matching alone.
+`checkOutreachTruthfulness` instead implements the coarser, still-meaningful rule PLAN.md's own
+"assert structural properties, not exact wording" framing calls for: split the body into
+sentences; if any sentence matches a small set of confident-assertion patterns modeled directly on
+spec §40's own bad example ("I noticed your team spends hours doing X") with no hedge word in the
+same sentence (modeled on spec §40's own good example's "if... is still being done manually, I
+think there may be..."), and the opportunity's evidence contains **no FACT-classified item at
+all**, the check fails. If even one FACT item exists, unhedged confident phrasing is allowed
+through — this doesn't verify that specific confident sentence traces to that specific fact, only
+that confident phrasing never appears when the opportunity has zero FACT-strength grounding to
+justify any confidence at all. Same category of "keyword/phrase heuristic, not real NLP, expect to
+extend patterns as real drafts are checked against it" as `riskCategory.ts` (ADR-0014 part 4).
+
+**Decision, part 4 — the agent signs off with a literal `"[Your name]"` placeholder, not a
+configured operator name:** Spec §87's example email signs with a real first name ("Mario"), but
+no `system_config`/env-var carries the operator's own name anywhere in the codebase yet, and
+inventing one would be exactly the kind of fabricated personalization spec §40 exists to forbid —
+just about the sender instead of the recipient. Since spec §41 already requires the operator to
+open, review, and possibly edit every draft before it's ever sent, a literal placeholder is the
+lowest-risk choice: it costs the operator one edit per email and adds no risk of a wrong or
+fabricated name going out. Revisit only if a later phase (most likely the Phase 12 dashboard, or a
+`system_config` operator-profile addition) gives the pipeline a real place to read the operator's
+name from.
+
+**Decision, part 5 — `WRITE_OUTREACH`'s handler does NOT transition `opportunities.status`, and
+enqueues no further work item:** Every prior handler collapsed the opportunity to the next
+lifecycle status in one write and enqueued the next stage's work item (ADR-0011 part 5 onward).
+This phase breaks that pattern deliberately: `OUTREACH_READY -> SENT` (the only transition
+`stateMachine.ts` allows from here) means the operator actually sent the email (spec §41/§45 — a
+manual action), which generating a draft has not done. Persisting an `outreach_drafts` row at
+`status: "DRAFT"` and leaving `opportunities.status` at `OUTREACH_READY` keeps the state machine
+honest: nothing in this codebase should ever claim `SENT` on the pipeline's own initiative.
+Recording an actual send (and moving to `SENT`) is Phase 12 (dashboard action) / Phase 13
+(outcome event) territory, not this handler's job.
+
+**Decision, part 6 — contacts are looked up by company (most recent row), not by a direct
+opportunity link:** `contacts` has no `opportunityId` column (spec §37-38's schema keys it by
+`companyId` only, since one company can in principle have multiple contacts over time). This
+handler orders by `contacts.createdAt` descending and takes the first row — safe because
+`contactHandler.ts` (Phase 9) only ever inserts one contact per `FIND_CONTACT` task, immediately
+before enqueueing this task's `WRITE_OUTREACH` item, so the most recent contact row for the
+opportunity's company is always the one Phase 9 just found for this exact opportunity. Documented
+here rather than added as a schema FK because retrofitting one is out of this phase's scope and
+the current single-opportunity-in-flight-per-company reality makes it unambiguous in practice.
+
+**Decision, part 7 — no live manual smoke test this phase:** Same blocker as Phases 8-9 (ADR-0015
+part 5, ADR-0016 part 6) — confirmed again for this phase: querying the live `data/aoh.db` shows
+all 8 real veterinary-clinic opportunities carried through from Phases 3-7 are still
+`VERIFIER_REJECTED`; no `offers` or `contacts` row has ever existed. There is no live
+`OUTREACH_READY` opportunity with a real `PENDING` `WRITE_OUTREACH` item to run
+`scripts/outreach.ts` against, and PLAN.md's Phase 10 acceptance criteria's "operator reads 3-5
+generated drafts against real opportunities from earlier phases" cannot be honestly satisfied
+without either fabricating fixture data as if it were real, or spending real Claude usage on a
+fresh discovery-through-offer/contact run, which is outside this phase's stated scope. Fixture
+tests (`outreachAgent.test.ts`, `outreachLint.test.ts`, `outreachHandler.test.ts`) cover the
+acceptance criteria's structural checks instead, same as Phase 8/9.
+
+**Consequences:** Phase 11 (the worker loop) is what will actually drive `WRITE_OUTREACH` items
+end-to-end autonomously; Phase 12 (dashboard) is where an operator will actually read/edit/mark a
+draft sent, which is also where `opportunities.status -> SENT` and the outcome-tracking spec §45
+actions belong. Whichever session first gets a real company through the whole pipeline to a live
+`OUTREACH_READY` opportunity should run `npm run outreach -- --opportunity <id>` and read the
+draft against spec §87's stated qualities (specific, truthful, short, human, low pressure,
+problem-focused, not AI-hype) before trusting this phase's prompt/lint design the way Phase 5's
+live evidence-quality check validated Deep Research — same "verify live behavior once real data
+exists" pattern flagged since ADR-0015 part 5.
+
+---
