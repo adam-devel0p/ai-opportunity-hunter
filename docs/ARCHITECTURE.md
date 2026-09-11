@@ -4,19 +4,21 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 3 (Discovery Agent + campaigns) — complete. See
-[phases/phase-3-discovery-agent.md](phases/phase-3-discovery-agent.md) for the full writeup.
+**Last updated:** Phase 4 (Pre-Screening Agent) — complete. See
+[phases/phase-4-prescreening-agent.md](phases/phase-4-prescreening-agent.md) for the full
+writeup.
 
 ## Status
 
-Phases 0-3 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-4 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
 normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
 primitives (priority selection, lifecycle transition validation, failure classification, crash
-recovery), and now Phase 3's first real agent + live DB wiring: manually-configured discovery
-campaigns, the Discovery Agent, diversity-aware campaign selection, and the `DISCOVER` task
-handler that persists deduped companies and enqueues `PRESCREEN` work. No worker loop, dashboard,
-or any agent past Discovery yet — see PLAN.md Phase 4 onward.
+recovery), Phase 3's first real agent + live DB wiring (manually-configured discovery campaigns,
+the Discovery Agent, diversity-aware campaign selection, the `DISCOVER` task handler), and now
+Phase 4's second real agent: the Pre-Screening Agent + the `PRESCREEN` task handler that
+classifies a discovered company and either discards it or enqueues `RESEARCH` work. No worker
+loop, dashboard, or any agent past Pre-Screening yet — see PLAN.md Phase 5 onward.
 
 ## Actual stack in use
 
@@ -58,6 +60,10 @@ src/
                                 never-invent-a-company rule (spec §14), `runDiscoveryAgent`
                                 (fast model tier per spec §52, WebSearch+WebFetch tools).
     discoveryAgent.test.ts
+    prescreenAgent.ts          Pre-Screening Agent (AGENT_CONTRACTS.md §2, Phase 4): Zod schema +
+                                hand-mirrored JSON Schema, prompt builder (fast model tier,
+                                `WebFetch`-only, ADR-0011 part 2), `runPrescreenAgent`.
+    prescreenAgent.test.ts
     schemas/
       deepResearchSpike.ts    Draft Zod + JSON Schema pair for the spike script only —
                                Phase 5 owns the real Deep Research Agent contract.
@@ -118,6 +124,20 @@ src/
                                   quota exhaustion, or routed through `failureClassification`
                                   on other failures — ADR-0010 part 5).
     discoverHandler.test.ts
+    prescreenHandler.ts          `runPrescreenTask` (Phase 4) — the second live-DB-wired task
+                                  handler: loads the company a `PRESCREEN` work item targets
+                                  (`entityId` is a company id here, per DATABASE_SCHEMA.md's
+                                  default), short-circuits to `DISCARDED` without ever calling
+                                  Claude if `nextEligibleResearchAt` hasn't passed yet (ADR-0011
+                                  part 3), otherwise runs the Pre-Screening Agent and acts on its
+                                  classification: `DISCARD` → company `DISCARDED`, nothing
+                                  re-queued; `MAYBE`/`PROMISING` (treated identically, ADR-0011
+                                  part 1) → company `PRESCREENED -> RESEARCH_PENDING` (one DB
+                                  write, ADR-0011 part 5) and a `RESEARCH` work item enqueued.
+                                  Classification + reasons appended to `companies.notes`
+                                  (ADR-0011 part 4). Quota exhaustion/other failures handled the
+                                  same way as `discoverHandler.ts`.
+    prescreenHandler.test.ts
 scripts/
   spike-research.ts            Phase 0 spike script (see below). Throwaway, not a
                                 production agent — no persistence, no Source-row hook.
@@ -127,6 +147,10 @@ scripts/
                                  for a given campaign (Phase 3's manual smoke-test entry point;
                                  no worker loop exists yet). `npm run discover -- --campaign
                                  <id> [--count <n>]`.
+  prescreen.ts                   Runs real PRESCREEN work items against the live `claude` CLI
+                                 (Phase 4's manual smoke-test entry point). `npm run prescreen --
+                                 --company <id>` for one, or `--all [--limit <n>]` for every
+                                 PENDING PRESCREEN item.
   db/
     migrate.ts                  `npm run db:migrate` — applies pending migrations to
                                  `AOH_DB_PATH` (default `./data/aoh.db`).
@@ -139,16 +163,17 @@ docs/
     phase-1-data-layer.md      Phase 1 completion doc.
     phase-2-work-queue.md      Phase 2 completion doc.
     phase-3-discovery-agent.md Phase 3 completion doc.
+    phase-4-prescreening-agent.md Phase 4 completion doc.
 ```
 
 Nothing under `src/app` or `src/worker.ts` exists yet — those are Phase 11+ (see PLAN.md's
-target layout for what's still to come). No dashboard and no agent past Discovery exist yet.
-Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts` are still
-deterministic primitives only (pure functions over plain objects/arrays), not wired to
-`work_items` reads/writes — that wiring happens incrementally as each later phase's agent
-handler is built (Phase 4 onward) and finally in Phase 11's `worker.ts` loop, which is also
-what will actually run `campaignSelection.ts` autonomously instead of the operator picking a
-campaign by id via `scripts/discover.ts`.
+target layout for what's still to come). No dashboard and no agent past Pre-Screening exist yet.
+Phase 2's `src/pipeline/` modules besides `campaignSelection.ts`/`discoverHandler.ts`/
+`prescreenHandler.ts` are still deterministic primitives only (pure functions over plain
+objects/arrays), not wired to `work_items` reads/writes — that wiring happens incrementally as
+each later phase's agent handler is built (Phase 5 onward) and finally in Phase 11's `worker.ts`
+loop, which is also what will actually run `campaignSelection.ts` autonomously instead of the
+operator picking a campaign by id via `scripts/discover.ts`.
 
 ## `src/agents/claudeClient.ts`
 
@@ -314,11 +339,16 @@ full reasoning:
   schema only. Do not import it from real agent code in later phases — Phase 5 builds the real
   Deep Research Agent from scratch against the finalized contract.
 - `src/pipeline/stateMachine.ts`, `priority.ts`, `failureClassification.ts`, and
-  `crashRecovery.ts` are still pure primitives with no live-DB wiring of their own — Phase 3's
-  `discoverHandler.ts` is the first module to actually call them against real `work_items`/
-  `companies` rows (for the `DISCOVER` task type only). Phase 4 onward wires the rest
-  incrementally; Phase 11's `worker.ts` is what runs `crashRecovery` at startup and drives the
-  main loop instead of the operator invoking `scripts/discover.ts` by hand.
+  `crashRecovery.ts` are still pure primitives with no live-DB wiring of their own beyond what
+  `discoverHandler.ts` (`DISCOVER`) and `prescreenHandler.ts` (`PRESCREEN`) call directly. Phase
+  5 onward wires the rest incrementally; Phase 11's `worker.ts` is what runs `crashRecovery` at
+  startup and drives the main loop instead of the operator invoking `scripts/discover.ts`/
+  `scripts/prescreen.ts` by hand.
+- `RESEARCH` work items now exist in the live DB (created by `prescreenHandler.ts` on `MAYBE`/
+  `PROMISING`) but nothing consumes them yet — Phase 5's Deep Research Agent is the first
+  handler that will pick them up. The 8 real companies from Phase 3's manual smoke test are all
+  sitting `RESEARCH_PENDING` with a `PENDING` `RESEARCH` work item as of Phase 4's own manual
+  smoke test, ready for Phase 5 to exercise without needing a fresh discovery/prescreen run.
 - `src/pipeline/failureClassification.ts`'s pattern lists (transient vs. permanent error text)
   are a reasoned starting point, not exhaustive — Phase 3's live discovery runs didn't exercise
   the failure path (both real runs succeeded), so these patterns are still unvalidated against

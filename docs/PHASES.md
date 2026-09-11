@@ -10,7 +10,7 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 1 | Data layer & domain model | ✅ | [phase-1-data-layer.md](phases/phase-1-data-layer.md) |
 | 2 | Work queue & state machine | ✅ | [phase-2-work-queue.md](phases/phase-2-work-queue.md) |
 | 3 | Discovery Agent + campaigns | ✅ | [phase-3-discovery-agent.md](phases/phase-3-discovery-agent.md) |
-| 4 | Pre-Screening Agent | ⬜ | — |
+| 4 | Pre-Screening Agent | ✅ | [phase-4-prescreening-agent.md](phases/phase-4-prescreening-agent.md) |
 | 5 | Deep Research Agent + evidence model | ⬜ | — |
 | 6 | Opportunity Analysis Agent + scoring | ⬜ | — |
 | 7 | Skeptical Verification Agent + gating | ⬜ | — |
@@ -22,8 +22,8 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 13 | Feedback loop & outcome analytics | ⬜ | — |
 | 14 | Operational hardening | ⬜ | — |
 
-**Current phase:** 4 — Pre-Screening Agent
-**Next phase:** 5 — Deep Research Agent + evidence model
+**Current phase:** 5 — Deep Research Agent + evidence model
+**Next phase:** 6 — Opportunity Analysis Agent + scoring
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -57,6 +57,19 @@ judgment calls made (retry-loop module placement, the SWRR selection algorithm, 
 work items reusing `entityId` for a campaign id, per-campaign dedupe hinting vs. global dedupe
 enforcement, quota-exhaustion → `DEFERRED` handling, model tier, `reasonToScreen` storage, and
 deferring `system_config`/`prompt_versions` wiring).
+
+Phase 4 added the second real agent: the Pre-Screening Agent (`src/agents/prescreenAgent.ts`,
+fast model tier, `WebFetch` only) and the `PRESCREEN` work-item handler
+(`src/pipeline/prescreenHandler.ts`) that classifies a discovered company as `DISCARD` (company
+transitions to `DISCARDED`, nothing re-queued) or `MAYBE`/`PROMISING` (company transitions
+`PRESCREENED -> RESEARCH_PENDING`, a `RESEARCH` work item is enqueued), plus a deterministic
+`nextEligibleResearchAt` freshness short-circuit that discards without ever calling Claude.
+Manually verified live against all 8 real veterinary clinics Phase 3 discovered — all classified
+`PROMISING` with specific, non-fabricated reasons — see
+[phase-4-prescreening-agent.md](phases/phase-4-prescreening-agent.md) and new ADR-0011 for the
+judgment calls made (`MAYBE` treated the same as `PROMISING`, `WebFetch`-only tooling, the
+forward-looking freshness check, reason storage in `notes`, and single-write transitive lifecycle
+transitions).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

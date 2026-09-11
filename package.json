@@ -15,7 +15,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/db/migrate.ts",
     "campaigns": "tsx scripts/campaigns.ts",
-    "discover": "tsx scripts/discover.ts"
+    "discover": "tsx scripts/discover.ts",
+    "prescreen": "tsx scripts/prescreen.ts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

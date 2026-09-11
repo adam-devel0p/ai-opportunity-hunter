@@ -421,3 +421,71 @@ Analysis, Skeptical Verification, Offer Builder, Contact Research, Outreach Writ
 on `runStructuredAgent.ts` rather than reimplementing the retry loop, and should follow the same
 per-task-type judgment-call pattern here (document scope decisions in a new ADR part rather than
 silently deviating) when the source spec doesn't pin something down.
+
+---
+
+## ADR-0011: Phase 4 (Pre-Screening Agent) judgment calls
+
+**Status:** Accepted (Phase 4).
+
+**Decision, part 1 — `MAYBE` is treated the same as `PROMISING`:** AGENT_CONTRACTS.md §2's
+output enum has three values (`DISCARD | MAYBE | PROMISING`), but PLAN.md's Phase 4 build text
+only describes two outcomes ("`DISCARD` outcomes recorded with reason and not re-queued,
+`PROMISING` outcomes enqueueing `RESEARCH`"), leaving `MAYBE` unaddressed.
+`src/pipeline/prescreenHandler.ts` routes `MAYBE` through the exact same path as `PROMISING`
+(company transitions to `RESEARCH_PENDING`, a `RESEARCH` work item is enqueued). Reasoning: this
+is a cheap, fast-tier (`haiku`), single-pass classification with no deep verification behind it;
+treating genuine uncertainty as a reason to permanently kill a company (the same as `DISCARD`)
+risks silently discarding real opportunities on a shallow signal, which is a worse failure mode
+than spending one more Deep Research call to actually resolve the uncertainty. Only `DISCARD` —
+reserved for cases the agent is confident about (dead site, wrong business type entirely) — halts
+the pipeline. Revisit if real usage shows `MAYBE` firing so often that it defeats the cost-saving
+purpose of pre-screening in the first place (spec §13).
+
+**Decision, part 2 — tools: `WebFetch` only, no `WebSearch`:** Unlike Discovery
+(`WebSearch`+`WebFetch`) and the planned Deep Research agent, the Pre-Screening Agent gets only
+`WebFetch`. AGENT_CONTRACTS.md §2's input is explicitly scoped to "a handful of fetched pages"
+for a company whose website is already known from Discovery — there is nothing to *search* for,
+only pages to *fetch* — and keeping the tool list minimal keeps this step cheap, which is its
+entire purpose (spec §13/§18).
+
+**Decision, part 3 — the `nextEligibleResearchAt` freshness short-circuit is implemented even
+though nothing in the current pipeline can yet produce a `PRESCREEN` item for a company where
+it fires:** PLAN.md's Phase 4 acceptance criteria explicitly requires this deterministic check
+("verify the agent handler checks `nextEligibleResearchAt` before even calling Claude, saving
+the call entirely"), tested via a fixture. Today, a `PRESCREEN` work item is only ever created by
+`discoverHandler.ts` for a brand-new company (`nextEligibleResearchAt` is always null at that
+point), so this branch is currently unreachable from the live pipeline — it exists as a
+forward-looking guard for whichever later phase first creates a `PRESCREEN` item against an
+already-researched company (e.g. a Phase 12 §72 "research this company now" manual trigger, or a
+future re-discovery-triggers-re-prescreen path). Implemented now rather than deferred, per the
+explicit acceptance criterion; the company's lifecycle is transitioned to `DISCARDED` via the
+same `transitionCompanyLifecycle` call used for a real Claude-classified `DISCARD`, so this path
+can only ever run against a company whose current status still allows that transition (if it
+doesn't — e.g. an already-`RESEARCHED` company somehow got a `PRESCREEN` item — the resulting
+`InvalidTransitionError` is a legitimate signal of a bug upstream, not something to swallow here).
+
+**Decision, part 4 — pre-screen classification + reasons are recorded in `companies.notes`, same
+convention as `reasonToScreen` (ADR-0010 part 7):** No dedicated schema column exists for
+pre-screen output. Rather than add one for a single phase's free-text summary, the classification
+and joined reasons are appended as a new line to the existing `notes` field (`"Prescreen
+(PROMISING): reason1; reason2"`), preserving whatever was already there (the Discovery reason,
+and potentially a prior phase's own line later). Revisit alongside ADR-0010 part 7 if a later
+phase (e.g. the Phase 12 dashboard) needs these distinguished as structured fields rather than
+one free-text audit trail.
+
+**Decision, part 5 — a `MAYBE`/`PROMISING` result validates the full
+`PRESCREEN_PENDING -> PRESCREENED -> RESEARCH_PENDING` chain but persists only the final state in
+one DB write:** Unlike `DISCOVER`'s `DISCOVERED -> PRESCREEN_PENDING` hop (a single transition
+persisted because the company then sits waiting for a separate worker pick-up of its `PRESCREEN`
+item), this handler both classifies *and* immediately enqueues the next (`RESEARCH`) work item in
+the same call — there's no window where a durably-visible `PRESCREENED` state matters on its own.
+Both transition functions are still called (so an invalid hop in the state table would still
+throw, same safety guarantee as a two-write version), but only the final `RESEARCH_PENDING`
+value is written to the row, avoiding a pointless intermediate `UPDATE`.
+
+**Consequences:** Phase 5 (Deep Research) is the next handler to pick up `RESEARCH` work items
+this phase's handler creates — it should read `companies.notes` if it wants pre-screen context,
+though it isn't required to (the company record itself carries everything Deep Research's
+contract needs). Same pattern as ADR-0010: document new judgment calls in a new ADR part rather
+than silently deviating.
