@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getDb } from "../../../lib/appDb";
 import { getCompanyDetail } from "../../../lib/dashboardQueries";
+import { excludeCompanyAction, setCompanyDoNotContactAction } from "../../actions/companies";
 import { formatDate } from "../../format";
 
 export const dynamic = "force-dynamic";
@@ -46,6 +47,7 @@ export default async function CompanyDetailPage({
         <div className="action-row" style={{ marginBottom: 8 }}>
           <span className="badge badge--neutral">{company.lifecycleStatus}</span>
           {company.doNotContact && <span className="badge badge--bad">DO NOT CONTACT</span>}
+          {company.exclusionReason && <span className="badge badge--bad">EXCLUDED</span>}
         </div>
         {company.description && <p>{company.description}</p>}
         <p style={{ color: "var(--text-muted)" }}>
@@ -53,6 +55,28 @@ export default async function CompanyDetailPage({
           {formatDate(company.lastDiscoveredAt)}
           {company.lastResearchedAt ? ` · Last researched ${formatDate(company.lastResearchedAt)}` : ""}
         </p>
+        {company.exclusionReason && (
+          <p style={{ color: "var(--text-muted)" }}>Exclusion reason: {company.exclusionReason}</p>
+        )}
+
+        <div className="action-row" style={{ marginTop: 10 }}>
+          <form action={setCompanyDoNotContactAction}>
+            <input type="hidden" name="companyId" value={company.id} />
+            <input type="hidden" name="doNotContact" value={company.doNotContact ? "false" : "true"} />
+            <button type="submit" className={company.doNotContact ? undefined : "danger"}>
+              {company.doNotContact ? "Allow contact again" : "Mark DO NOT CONTACT"}
+            </button>
+          </form>
+          {company.lifecycleStatus !== "EXCLUDED" && (
+            <form action={excludeCompanyAction} className="action-row">
+              <input type="hidden" name="companyId" value={company.id} />
+              <input type="text" name="reason" placeholder="Reason (optional)" />
+              <button type="submit" className="danger">
+                Exclude company
+              </button>
+            </form>
+          )}
+        </div>
       </div>
 
       {company.notes && (

@@ -167,6 +167,33 @@ describe("getRecentActivity", () => {
     );
   });
 
+  it("describes a completed REFRESH_EVIDENCE item as an info-level 'evidence refreshed' entry", () => {
+    const [company] = db
+      .insert(companies)
+      .values({
+        name: "Bramble Vets",
+        normalizedDomain: "bramble-vets.example",
+        website: "https://bramble-vets.example",
+        lifecycleStatus: "RESEARCHED",
+      })
+      .returning()
+      .all();
+    db.insert(workItems)
+      .values({
+        taskType: "REFRESH_EVIDENCE",
+        entityId: company!.id,
+        status: "COMPLETED",
+        priority: 30,
+        completedAt: new Date("2026-01-03T00:00:00Z"),
+        updatedAt: new Date("2026-01-03T00:00:00Z"),
+      })
+      .run();
+
+    const activity = getRecentActivity(db);
+    expect(activity[0]?.message).toBe("Evidence refreshed for Bramble Vets");
+    expect(activity[0]?.level).toBe("info");
+  });
+
   it("is capped by limit and sorted newest first", () => {
     const [campaign] = db
       .insert(discoveryCampaigns)

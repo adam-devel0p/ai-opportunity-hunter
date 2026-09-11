@@ -5,10 +5,11 @@
  * server — the `src/app/**\/actions.ts` files are thin wrappers that just call these.
  */
 
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   companies,
+  contacts,
   opportunities,
   outreachDrafts,
   outreachOutcomes,
@@ -16,7 +17,11 @@ import {
 } from "../db/schema.js";
 import { normalizeDomain } from "./normalize.js";
 import { TASK_TYPE_PRIORITY } from "../pipeline/priority.js";
-import { transitionOpportunityStatus } from "../pipeline/stateMachine.js";
+import {
+  transitionCompanyLifecycle,
+  transitionOpportunityStatus,
+  transitionWorkItemStatus,
+} from "../pipeline/stateMachine.js";
 
 export type RejectionReason = NonNullable<
   (typeof opportunities.$inferSelect)["rejectionReason"]
@@ -240,4 +245,75 @@ export function requestManualResearch(
   if (!item) throw new Error("requestManualResearch: failed to enqueue RESEARCH work item");
 
   return { kind: "queued", companyId: company.id, workItemId: item.id };
+}
+
+// --- exclusion / DO_NOT_CONTACT operator actions (spec §61, §64-65) --------
+
+function requireCompany(db: Db, id: string) {
+  const company = db.select().from(companies).where(eq(companies.id, id)).get();
+  if (!company) throw new Error(`No company with id ${id}`);
+  return company;
+}
+
+const CANCELLABLE_WORK_ITEM_STATUSES = ["PENDING", "RETRYABLE", "DEFERRED"] as const;
+
+/**
+ * Spec §61 "exclude company permanently" — sets `lifecycleStatus = EXCLUDED` (the special-case
+ * transition `stateMachine.ts` allows from any status) and cancels this company's own not-yet-run
+ * `PRESCREEN`/`RESEARCH` work items, so nothing already queued for it runs after the operator has
+ * explicitly excluded it. Deliberately scoped to company-stage work only — an opportunity already
+ * deep in verification/offer/contact/outreach is left for the operator's existing
+ * approve/reject flow rather than silently cascade-cancelled (see ADR-0021).
+ */
+export function excludeCompany(
+  db: Db,
+  companyId: string,
+  reason?: string,
+  now: Date = new Date(),
+): void {
+  const company = requireCompany(db, companyId);
+  const nextLifecycle = transitionCompanyLifecycle(company.lifecycleStatus, "EXCLUDED");
+  db.update(companies)
+    .set({ lifecycleStatus: nextLifecycle, exclusionReason: reason ?? null, updatedAt: now })
+    .where(eq(companies.id, companyId))
+    .run();
+
+  const items = db
+    .select()
+    .from(workItems)
+    .where(
+      and(
+        eq(workItems.entityId, companyId),
+        inArray(workItems.taskType, ["PRESCREEN", "RESEARCH"]),
+      ),
+    )
+    .all()
+    .filter((item) => (CANCELLABLE_WORK_ITEM_STATUSES as readonly string[]).includes(item.status));
+  for (const item of items) {
+    const cancelled = transitionWorkItemStatus(item.status, "CANCELLED");
+    db.update(workItems).set({ status: cancelled, updatedAt: now }).where(eq(workItems.id, item.id)).run();
+  }
+}
+
+/** Spec §65: a company-wide DO_NOT_CONTACT toggle, reversible by the operator. */
+export function setCompanyDoNotContact(
+  db: Db,
+  companyId: string,
+  doNotContact: boolean,
+  now: Date = new Date(),
+): void {
+  requireCompany(db, companyId);
+  db.update(companies).set({ doNotContact, updatedAt: now }).where(eq(companies.id, companyId)).run();
+}
+
+/** Spec §65: a per-contact DO_NOT_CONTACT toggle, reversible by the operator. */
+export function setContactDoNotContact(
+  db: Db,
+  contactId: string,
+  doNotContact: boolean,
+  now: Date = new Date(),
+): void {
+  const contact = db.select().from(contacts).where(eq(contacts.id, contactId)).get();
+  if (!contact) throw new Error(`No contact with id ${contactId}`);
+  db.update(contacts).set({ doNotContact, updatedAt: now }).where(eq(contacts.id, contactId)).run();
 }

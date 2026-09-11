@@ -40,6 +40,7 @@ import {
 } from "../agents/outreachAgent.js";
 import type { StructuredAgentResult } from "../agents/runStructuredAgent.js";
 import { toContactDisplay } from "../lib/contactDisplay.js";
+import { isDoNotContact } from "../lib/doNotContact.js";
 import { lintOutreachDraft, type OutreachLintResult } from "../lib/outreachLint.js";
 import { resolveFailureOutcome } from "./failureClassification.js";
 import { transitionWorkItemStatus, type WorkItemStatus } from "./stateMachine.js";
@@ -69,6 +70,10 @@ export interface WriteOutreachTaskOutcome {
   outreachDraftId?: string;
   wordCount?: number;
   regenerated?: boolean;
+  /** True when this task short-circuited on a spec §65 DO_NOT_CONTACT check rather than
+   * generating a draft — `error` carries a human-readable explanation in that case, but this is a
+   * deliberate skip (workItemStatus is COMPLETED), not a genuine failure. */
+  doNotContact?: boolean;
   costUsd?: number | null;
   error?: string;
 }
@@ -124,6 +129,26 @@ export async function runWriteOutreachTask(
     throw new Error(
       `Company ${company.id} has no contacts row (Phase 9 should have created one before enqueueing WRITE_OUTREACH)`,
     );
+  }
+
+  // Defensive re-check (spec §65): contactHandler.ts already skips enqueueing WRITE_OUTREACH for
+  // a DO_NOT_CONTACT contact, but this item could have been enqueued before the operator set
+  // DO_NOT_CONTACT afterward — re-reading it live here, right before ever calling Claude, closes
+  // that race the same way prescreenHandler.ts's exclusion check does for spec §61.
+  if (isDoNotContact({ companyDoNotContact: company.doNotContact, contactDoNotContact: contact.doNotContact })) {
+    const message = `Skipped: ${
+      contact.doNotContact ? "contact" : "company"
+    } is marked DO_NOT_CONTACT (spec §65) — no outreach draft generated.`;
+    db.update(companies)
+      .set({ notes: appendNote(company.notes, `Outreach: ${message}`), updatedAt: now })
+      .where(eq(companies.id, company.id))
+      .run();
+    const completedStatus = transitionWorkItemStatus(workItem.status, "COMPLETED");
+    db.update(workItems)
+      .set({ status: completedStatus, completedAt: now, updatedAt: now })
+      .where(eq(workItems.id, workItem.id))
+      .run();
+    return { workItemStatus: completedStatus, doNotContact: true, error: message };
   }
 
   const evidenceRows = db

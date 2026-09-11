@@ -20,7 +20,7 @@
 
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { companies, evidenceItems, sources, workItems } from "../db/schema.js";
+import { companies, workItems } from "../db/schema.js";
 import {
   runDeepResearchAgent,
   type DeepResearchOutput,
@@ -30,6 +30,7 @@ import type { StructuredAgentResult } from "../agents/runStructuredAgent.js";
 import { computeNextEligibleResearchAt } from "../lib/researchFreshness.js";
 import { resolveFailureOutcome } from "./failureClassification.js";
 import { TASK_TYPE_PRIORITY } from "./priority.js";
+import { persistVerifiedEvidence } from "./researchEvidence.js";
 import {
   transitionCompanyLifecycle,
   transitionWorkItemStatus,
@@ -57,6 +58,9 @@ export interface RunResearchTaskOptions {
   runDeepResearch?: (
     input: RunDeepResearchAgentInput,
   ) => Promise<StructuredAgentResult<DeepResearchOutput>>;
+  /** Overrides the spec §60 re-research freshness window; defaults to
+   * `DEFAULT_RESEARCH_FRESHNESS_WINDOW_MS`. */
+  reResearchWindowMs?: number;
 }
 
 export interface ResearchTaskOutcome {
@@ -72,16 +76,6 @@ export interface ResearchTaskOutcome {
 
 function appendNote(existing: string | null, addition: string): string {
   return existing ? `${existing}\n${addition}` : addition;
-}
-
-/** Tolerates a single trailing slash difference between the model's cited `sourceUrl` and the
- * hook-recorded `sources.url` — both are otherwise required to match exactly. Anything more
- * exotic (protocol/casing differences) is treated as a genuine mismatch and dropped, since
- * silently normalizing further would start eroding the point of the check. */
-function urlsMatch(a: string, b: string): boolean {
-  if (a === b) return true;
-  const strip = (u: string) => u.replace(/\/$/, "");
-  return strip(a) === strip(b);
 }
 
 export async function runResearchTask(
@@ -150,39 +144,12 @@ export async function runResearchTask(
 
   const { evidence, candidateProblems } = result.data;
 
-  let insertedEvidenceCount = 0;
-  let droppedUnverifiedEvidenceCount = 0;
-
-  for (const item of evidence) {
-    // The hook (ADR-0004) already recorded every real WebFetch call this task made as a
-    // `sources` row. Only an evidence item whose sourceUrl matches one of those is trusted —
-    // this is the actual enforcement point for "the model's own claim of what it fetched is
-    // never the sole record of provenance."
-    const candidates = db
-      .select()
-      .from(sources)
-      .where(eq(sources.fetchedByTaskId, workItem.id))
-      .all();
-    const matchedSource = candidates.find((source) => urlsMatch(source.url, item.sourceUrl));
-
-    if (!matchedSource) {
-      droppedUnverifiedEvidenceCount++;
-      continue;
-    }
-
-    db.insert(evidenceItems)
-      .values({
-        companyId: company.id,
-        sourceId: matchedSource.id,
-        claim: item.claim,
-        classification: item.classification,
-        supportingExcerpt: item.supportingExcerpt,
-        confidence: item.confidence,
-        generatedByTaskId: workItem.id,
-      })
-      .run();
-    insertedEvidenceCount++;
-  }
+  const { insertedEvidenceCount, droppedUnverifiedEvidenceCount } = persistVerifiedEvidence(
+    db,
+    company.id,
+    workItem.id,
+    evidence,
+  );
 
   const noteLines = [
     `Research: ${insertedEvidenceCount} evidence item(s) recorded` +
@@ -200,7 +167,7 @@ export async function runResearchTask(
     .set({
       lifecycleStatus: nextLifecycle,
       lastResearchedAt: now,
-      nextEligibleResearchAt: computeNextEligibleResearchAt(now),
+      nextEligibleResearchAt: computeNextEligibleResearchAt(now, options.reResearchWindowMs),
       notes: appendNote(company.notes, noteLines.join("\n")),
       updatedAt: now,
     })

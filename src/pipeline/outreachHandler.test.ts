@@ -225,6 +225,38 @@ describe("runWriteOutreachTask", () => {
     ).rejects.toThrow(/no contacts row/);
   });
 
+  it("skips draft generation (COMPLETED, no Claude call) when the company is DO_NOT_CONTACT", async () => {
+    const company = seedCompany({ doNotContact: true });
+    const opportunity = seedOpportunity(company.id);
+    seedOffer(opportunity.id);
+    seedContact(company.id);
+    const workItem = seedRunningWorkItem(opportunity.id);
+
+    const runOutreach = vi.fn(async () => success(validDraft));
+    const outcome = await runWriteOutreachTask({ db, workItem, runOutreach });
+
+    expect(runOutreach).not.toHaveBeenCalled();
+    expect(outcome.workItemStatus).toBe("COMPLETED");
+    expect(outcome.doNotContact).toBe(true);
+    expect(outcome.outreachDraftId).toBeUndefined();
+    expect(db.select().from(outreachDrafts).all()).toHaveLength(0);
+  });
+
+  it("skips draft generation when the specific contact (not the company) is DO_NOT_CONTACT", async () => {
+    const company = seedCompany();
+    const opportunity = seedOpportunity(company.id);
+    seedOffer(opportunity.id);
+    seedContact(company.id, { doNotContact: true });
+    const workItem = seedRunningWorkItem(opportunity.id);
+
+    const runOutreach = vi.fn(async () => success(validDraft));
+    const outcome = await runWriteOutreachTask({ db, workItem, runOutreach });
+
+    expect(runOutreach).not.toHaveBeenCalled();
+    expect(outcome.doNotContact).toBe(true);
+    expect(db.select().from(outreachDrafts).all()).toHaveLength(0);
+  });
+
   it("writes and persists a compliant draft, without transitioning the opportunity or enqueueing further work", async () => {
     const company = seedCompany();
     const opportunity = seedOpportunity(company.id);

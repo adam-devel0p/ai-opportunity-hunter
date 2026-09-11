@@ -14,6 +14,7 @@ import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, discoveryCampaigns, workItems } from "../db/schema.js";
 import { normalizeDomain } from "../lib/normalize.js";
+import { checkExclusion } from "../lib/exclusions.js";
 import {
   runDiscoveryAgent,
   type DiscoveryOutput,
@@ -54,6 +55,10 @@ export interface DiscoverTaskOutcome {
   // transitions are validated at runtime by transitionWorkItemStatus, not re-narrowed here.
   workItemStatus: WorkItemStatus;
   insertedCompanyIds: string[];
+  /** Newly-discovered companies inserted straight at EXCLUDED (spec §61), never enqueued for
+   * PRESCREEN — not counted in `insertedCompanyIds` since nothing downstream will ever act on
+   * them. */
+  excludedCompanyIds: string[];
   skippedDuplicateDomains: string[];
   createdPrescreenWorkItemIds: string[];
   costUsd?: number | null;
@@ -108,6 +113,7 @@ export async function runDiscoverTask(
     return {
       workItemStatus: nextStatus,
       insertedCompanyIds: [],
+      excludedCompanyIds: [],
       skippedDuplicateDomains: [],
       createdPrescreenWorkItemIds: [],
       error: result.message,
@@ -132,6 +138,7 @@ export async function runDiscoverTask(
     return {
       workItemStatus: failureOutcome.status,
       insertedCompanyIds: [],
+      excludedCompanyIds: [],
       skippedDuplicateDomains: [],
       createdPrescreenWorkItemIds: [],
       error: result.message,
@@ -139,6 +146,7 @@ export async function runDiscoverTask(
   }
 
   const insertedCompanyIds: string[] = [];
+  const excludedCompanyIds: string[] = [];
   const skippedDuplicateDomains: string[] = [];
   const createdPrescreenWorkItemIds: string[] = [];
 
@@ -146,19 +154,46 @@ export async function runDiscoverTask(
     const normalizedDomain = normalizeDomain(candidate.website);
 
     const existing = db
-      .select({ id: companies.id })
+      .select({ id: companies.id, lifecycleStatus: companies.lifecycleStatus })
       .from(companies)
       .where(eq(companies.normalizedDomain, normalizedDomain))
       .get();
 
     if (existing) {
       skippedDuplicateDomains.push(normalizedDomain);
+      // Cheap defense-in-depth: if an exclusion rule now matches a company discovered before
+      // that rule existed, mark it EXCLUDED here too rather than waiting for a PRESCREEN item to
+      // exist and hit prescreenHandler.ts's own check (the authoritative enforcement point, since
+      // it runs against live rules right before every Claude call — see ADR-0021).
+      const rediscoveredExclusion =
+        existing.lifecycleStatus !== "EXCLUDED"
+          ? checkExclusion(db, {
+              normalizedDomain,
+              industry: candidate.industry,
+              country: candidate.country,
+            })
+          : null;
       db.update(companies)
-        .set({ lastDiscoveredAt: now, updatedAt: now })
+        .set({
+          lastDiscoveredAt: now,
+          updatedAt: now,
+          ...(rediscoveredExclusion?.excluded
+            ? {
+                lifecycleStatus: transitionCompanyLifecycle(existing.lifecycleStatus, "EXCLUDED"),
+                exclusionReason: rediscoveredExclusion.reason,
+              }
+            : {}),
+        })
         .where(eq(companies.id, existing.id))
         .run();
       continue;
     }
+
+    const exclusion = checkExclusion(db, {
+      normalizedDomain,
+      industry: candidate.industry,
+      country: candidate.country,
+    });
 
     const [inserted] = db
       .insert(companies)
@@ -177,10 +212,23 @@ export async function runDiscoverTask(
         notes: `Discovery reason: ${candidate.reasonToScreen}`,
         sourceCampaignId: campaign.id,
         lifecycleStatus: "DISCOVERED",
+        exclusionReason: exclusion.excluded ? exclusion.reason : null,
       })
       .returning()
       .all();
     if (!inserted) {
+      continue;
+    }
+
+    if (exclusion.excluded) {
+      // Never reaches PRESCREEN_PENDING and no PRESCREEN item is enqueued — this is spec §61's
+      // "the system must respect these exclusions during future autonomous discovery" applied at
+      // the earliest possible point, before any work item for this company exists at all.
+      db.update(companies)
+        .set({ lifecycleStatus: transitionCompanyLifecycle("DISCOVERED", "EXCLUDED"), updatedAt: now })
+        .where(eq(companies.id, inserted.id))
+        .run();
+      excludedCompanyIds.push(inserted.id);
       continue;
     }
 
@@ -216,6 +264,7 @@ export async function runDiscoverTask(
   return {
     workItemStatus: completedStatus,
     insertedCompanyIds,
+    excludedCompanyIds,
     skippedDuplicateDomains,
     createdPrescreenWorkItemIds,
     costUsd: result.costUsd,

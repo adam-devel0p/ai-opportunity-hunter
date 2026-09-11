@@ -158,6 +158,16 @@ function describeCompanyTaskItem(
       level: "info",
     };
   }
+  if (item.taskType === "REFRESH_EVIDENCE") {
+    return {
+      workItemId: item.id,
+      taskType: item.taskType,
+      status: item.status,
+      timestamp,
+      message: `Evidence refreshed for ${company.name}`,
+      level: "info",
+    };
+  }
   // ANALYZE
   const opportunity = db
     .select({ problemTitle: opportunities.problemTitle })
@@ -281,12 +291,11 @@ export function getRecentActivity(db: Db, limit = 50): ActivityEntry[] {
       entries.push(...describeDiscoverItem(db, item));
       continue;
     }
-    if (item.taskType === "REFRESH_EVIDENCE") {
-      entries.push(genericFailureMessage(item, `entity ${item.entityId}`));
-      continue;
-    }
     const entry =
-      item.taskType === "PRESCREEN" || item.taskType === "RESEARCH" || item.taskType === "ANALYZE"
+      item.taskType === "PRESCREEN" ||
+      item.taskType === "RESEARCH" ||
+      item.taskType === "ANALYZE" ||
+      item.taskType === "REFRESH_EVIDENCE"
         ? describeCompanyTaskItem(db, item)
         : describeOpportunityTaskItem(db, item);
     if (entry) entries.push(entry);

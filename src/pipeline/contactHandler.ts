@@ -17,7 +17,9 @@
  * On success, the opportunity transitions `CONTACT_RESEARCH -> OUTREACH_READY` and a
  * `WRITE_OUTREACH` work item is enqueued (Phase 10's agent, same "each handler wires the next
  * stage's queue regardless of whether that stage's agent is built yet" pattern as every earlier
- * handler).
+ * handler) — unless the found contact (or the owning company) is DO_NOT_CONTACT (spec §65), in
+ * which case the contact is still recorded but no `WRITE_OUTREACH` item is ever created; see
+ * `src/lib/doNotContact.ts`.
  */
 
 import { eq } from "drizzle-orm";
@@ -30,6 +32,7 @@ import {
 } from "../agents/contactAgent.js";
 import type { StructuredAgentResult } from "../agents/runStructuredAgent.js";
 import { toContactDisplay } from "../lib/contactDisplay.js";
+import { isDoNotContact } from "../lib/doNotContact.js";
 import { resolveFailureOutcome } from "./failureClassification.js";
 import { TASK_TYPE_PRIORITY } from "./priority.js";
 import {
@@ -66,6 +69,9 @@ export interface FindContactTaskOutcome {
   emailConfidence?: ContactAgentOutput["emailConfidence"];
   isVerifiedEmail?: boolean;
   isPreferredForInitialOutreach?: boolean;
+  /** True when this contact (or the owning company) is DO_NOT_CONTACT (spec §65) — in that case
+   * `createdWriteOutreachWorkItemId` is deliberately null; no outreach is ever generated. */
+  doNotContact?: boolean;
   createdWriteOutreachWorkItemId?: string | null;
   costUsd?: number | null;
   error?: string;
@@ -157,6 +163,20 @@ export async function runFindContactTask(
 
   const output = result.data;
 
+  // Spec §64 "avoid generating repeated outreach for people marked as opted out": a prior
+  // contacts row for this same company/email that the operator already marked DO_NOT_CONTACT
+  // must carry that flag forward onto this freshly-found row too, since a later research pass
+  // creates a new `contacts` row rather than updating the old one (contacts are append-only, same
+  // as every other agent-produced record in this pipeline).
+  const existingCompanyContacts = db
+    .select({ email: contacts.email, doNotContact: contacts.doNotContact })
+    .from(contacts)
+    .where(eq(contacts.companyId, company.id))
+    .all();
+  const inheritedDoNotContact = existingCompanyContacts.some(
+    (row) => row.doNotContact && output.email && row.email?.toLowerCase() === output.email.toLowerCase(),
+  );
+
   const [contact] = db
     .insert(contacts)
     .values({
@@ -168,6 +188,7 @@ export async function runFindContactTask(
       email: output.email,
       emailSource: output.emailSource,
       emailConfidence: output.emailConfidence,
+      doNotContact: inheritedDoNotContact,
     })
     .returning()
     .all();
@@ -176,6 +197,10 @@ export async function runFindContactTask(
   }
 
   const display = toContactDisplay(contact);
+  const doNotContact = isDoNotContact({
+    companyDoNotContact: company.doNotContact,
+    contactDoNotContact: contact.doNotContact,
+  });
 
   // Same "validate the hop, persist only the final status" pattern as prescreenHandler.ts
   // (ADR-0011 part 5) / analyzeHandler.ts (ADR-0013 part 3) / offerHandler.ts (ADR-0015 part 4).
@@ -185,24 +210,34 @@ export async function runFindContactTask(
     .where(eq(opportunities.id, opportunity.id))
     .run();
 
+  const dncSuffix = doNotContact
+    ? ` (DO_NOT_CONTACT — no outreach draft will be generated, spec §65)`
+    : "";
   const noteLine =
     `Contact: ${output.name}${output.role ? ` (${output.role})` : ""} — email confidence: ` +
-    `${output.emailConfidence}${output.email ? ` (${output.email})` : ""}.`;
+    `${output.emailConfidence}${output.email ? ` (${output.email})` : ""}${dncSuffix}.`;
   db.update(companies)
     .set({ notes: appendNote(company.notes, noteLine), updatedAt: now })
     .where(eq(companies.id, company.id))
     .run();
 
-  const [writeOutreachItem] = db
-    .insert(workItems)
-    .values({
-      taskType: "WRITE_OUTREACH",
-      entityId: opportunity.id,
-      status: "PENDING",
-      priority: TASK_TYPE_PRIORITY.WRITE_OUTREACH,
-    })
-    .returning()
-    .all();
+  // Spec §65: once DO_NOT_CONTACT is set (on the company or this specific contact), autonomous
+  // processes must not generate new outreach — so no WRITE_OUTREACH item is enqueued at all. The
+  // contact record itself is still formed (useful information on its own), and the opportunity
+  // still advances to OUTREACH_READY — it simply stays there with no draft, same "form the
+  // record, let it stall rather than disappear" pattern as a GUESSED/UNKNOWN email.
+  const writeOutreachItem = doNotContact
+    ? undefined
+    : db
+        .insert(workItems)
+        .values({
+          taskType: "WRITE_OUTREACH",
+          entityId: opportunity.id,
+          status: "PENDING",
+          priority: TASK_TYPE_PRIORITY.WRITE_OUTREACH,
+        })
+        .returning()
+        .all()[0];
 
   const completedStatus = transitionWorkItemStatus(workItem.status, "COMPLETED");
   db.update(workItems)
@@ -217,6 +252,7 @@ export async function runFindContactTask(
     emailConfidence: output.emailConfidence,
     isVerifiedEmail: display.isVerifiedEmail,
     isPreferredForInitialOutreach: display.isPreferredForInitialOutreach,
+    doNotContact,
     createdWriteOutreachWorkItemId: writeOutreachItem?.id ?? null,
     costUsd: result.costUsd,
   };

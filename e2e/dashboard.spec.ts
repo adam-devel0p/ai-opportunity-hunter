@@ -108,4 +108,40 @@ test.describe.serial("AI Opportunity Hunter dashboard", () => {
     await expect(page.getByText("Queued for research")).toBeVisible();
     await expect(page.getByText("RESEARCH_PENDING")).toBeVisible();
   });
+
+  test("operator can toggle DO_NOT_CONTACT and then exclude a company (spec §61/§65)", async ({ page }) => {
+    await page.goto("/companies");
+    await page.getByRole("link", { name: "Acme Plumbing" }).click();
+
+    await page.getByRole("button", { name: "Mark DO NOT CONTACT" }).click();
+    await expect(page.getByText("DO NOT CONTACT", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Allow contact again" })).toBeVisible();
+
+    await page.getByPlaceholder("Reason (optional)").fill("No longer a fit.");
+    await page.getByRole("button", { name: "Exclude company" }).click();
+    // Two "EXCLUDED" badges appear: lifecycleStatus and the dedicated exclusion badge.
+    await expect(page.getByText("EXCLUDED", { exact: true })).toHaveCount(2);
+    await expect(page.getByText("No longer a fit.")).toBeVisible();
+  });
+
+  test("operator can manage exclusion rules and configure the gate/re-research window from Settings (spec §61/§70)", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+
+    await page.getByRole("combobox").selectOption("COUNTRY");
+    await page.getByPlaceholder("e.g. example.com / gambling / RU").fill("RU");
+    await page.getByRole("button", { name: "Add rule" }).click();
+    await expect(page.getByText("RU", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Remove" }).click();
+    await expect(page.getByText("No exclusion rules yet.")).toBeVisible();
+
+    await page.getByLabel("Score threshold (0-100)").fill("80");
+    await page.getByRole("button", { name: "Save gate config" }).click();
+    await expect(page.getByLabel("Score threshold (0-100)")).toHaveValue("80");
+
+    await expect(page.getByRole("link", { name: "Download everything as JSON" })).toBeVisible();
+  });
 });

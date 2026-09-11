@@ -8,6 +8,7 @@ import type { Db } from "../db/client.js";
 import { companies, workItems } from "../db/schema.js";
 import type { PrescreenOutput, RunPrescreenAgentInput } from "../agents/prescreenAgent.js";
 import type { StructuredAgentResult } from "../agents/runStructuredAgent.js";
+import { addExclusionRule } from "../lib/exclusions.js";
 import { TASK_TYPE_PRIORITY } from "./priority.js";
 import { runPrescreenTask, type PrescreenWorkItemContext } from "./prescreenHandler.js";
 
@@ -148,6 +149,32 @@ describe("runPrescreenTask", () => {
     expect(updatedCompany?.lifecycleStatus).toBe("DISCARDED");
     expect(updatedCompany?.notes).toContain("Prescreen (DISCARD)");
     expect(updatedCompany?.notes).toContain("connection timed out");
+
+    expect(db.select().from(workItems).where(eq(workItems.taskType, "RESEARCH")).all()).toHaveLength(0);
+  });
+
+  it("excludes a company matching a live exclusion rule, without calling Claude, even if the rule was added after this company was discovered", async () => {
+    const company = seedCompany({ industry: "gambling" });
+    const workItem = seedRunningWorkItem(company.id);
+    // Rule added *after* the company already exists and its PRESCREEN item was enqueued — this
+    // is exactly the retroactive case discoverHandler.ts's own check can't catch on its own.
+    addExclusionRule(db, { type: "INDUSTRY", value: "gambling", reason: "Regulated industry, skip." });
+
+    const runPrescreen = vi.fn(async (_input: RunPrescreenAgentInput) =>
+      success({ classification: "PROMISING", reasons: ["should never be called"] }),
+    );
+
+    const outcome = await runPrescreenTask({ db, workItem, runPrescreen });
+
+    expect(runPrescreen).not.toHaveBeenCalled();
+    expect(outcome.workItemStatus).toBe("COMPLETED");
+    expect(outcome.excluded).toBe(true);
+    expect(outcome.companyLifecycleStatus).toBe("EXCLUDED");
+    expect(outcome.createdResearchWorkItemId).toBeNull();
+
+    const updatedCompany = db.select().from(companies).where(eq(companies.id, company.id)).get();
+    expect(updatedCompany?.lifecycleStatus).toBe("EXCLUDED");
+    expect(updatedCompany?.exclusionReason).toContain("Regulated industry, skip.");
 
     expect(db.select().from(workItems).where(eq(workItems.taskType, "RESEARCH")).all()).toHaveLength(0);
   });

@@ -14,6 +14,7 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, workItems } from "../db/schema.js";
+import { checkExclusion } from "../lib/exclusions.js";
 import {
   runPrescreenAgent,
   type PrescreenOutput,
@@ -53,6 +54,9 @@ export interface PrescreenTaskOutcome {
   classification?: "DISCARD" | "MAYBE" | "PROMISING";
   companyLifecycleStatus?: CompanyLifecycleStatus;
   createdResearchWorkItemId?: string | null;
+  /** True when this task short-circuited on a spec §61 exclusion rule rather than running the
+   * agent — `classification` is not set in that case (DISCARD/MAYBE/PROMISING don't apply). */
+  excluded?: boolean;
   costUsd?: number | null;
   error?: string;
 }
@@ -76,6 +80,43 @@ export async function runPrescreenTask(
     throw new Error(
       `PRESCREEN work item ${workItem.id} references unknown company ${workItem.entityId}`,
     );
+  }
+
+  // Deterministic exclusion check (spec §61), ahead of the freshness check below: an operator
+  // rule (domain/industry/country) added at any point — even after this company was discovered
+  // and this PRESCREEN item was enqueued — is checked live, right before the one point that
+  // would otherwise spend a Claude call. This is the authoritative enforcement point (see
+  // ADR-0021); discoverHandler.ts's own check only covers the common case of a rule that already
+  // existed at discovery time.
+  const exclusion = checkExclusion(db, {
+    normalizedDomain: company.normalizedDomain,
+    industry: company.industry,
+    country: company.country,
+  });
+  if (exclusion.excluded) {
+    const nextLifecycle = transitionCompanyLifecycle(company.lifecycleStatus, "EXCLUDED");
+    db.update(companies)
+      .set({
+        lifecycleStatus: nextLifecycle,
+        exclusionReason: exclusion.reason,
+        notes: appendNote(company.notes, `Prescreen (EXCLUDED, no Claude call): ${exclusion.reason}`),
+        updatedAt: now,
+      })
+      .where(eq(companies.id, company.id))
+      .run();
+
+    const completedStatus = transitionWorkItemStatus(workItem.status, "COMPLETED");
+    db.update(workItems)
+      .set({ status: completedStatus, completedAt: now, updatedAt: now })
+      .where(eq(workItems.id, workItem.id))
+      .run();
+
+    return {
+      workItemStatus: completedStatus,
+      companyLifecycleStatus: nextLifecycle,
+      createdResearchWorkItemId: null,
+      excluded: true,
+    };
   }
 
   // Deterministic freshness check (spec §60): if this company was already researched recently

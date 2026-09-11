@@ -20,11 +20,10 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done
 | 11 | Autonomous scheduler/worker | ✅ | [phase-11-autonomous-worker.md](phases/phase-11-autonomous-worker.md) |
 | 12 | Dashboard MVP | ✅ | [phase-12-dashboard-mvp.md](phases/phase-12-dashboard-mvp.md) |
 | 13 | Feedback loop & outcome analytics | ✅ | [phase-13-feedback-loop-analytics.md](phases/phase-13-feedback-loop-analytics.md) |
-| 14 | Operational hardening | ⬜ | — |
+| 14 | Operational hardening | ✅ | [phase-14-operational-hardening.md](phases/phase-14-operational-hardening.md) |
 
-**Current phase:** 14 — Operational hardening
-**Next phase:** — (last planned phase; see PLAN.md's "Deferred beyond these phases" for what
-comes after)
+**Current phase:** 14 — Operational hardening (done — last planned phase)
+**Next phase:** — none planned; see PLAN.md's "Deferred beyond these phases" for what comes after
 
 Phase 0 confirmed both risks it existed to de-risk: research quality (3/3 real-company spike
 runs judged strong, see [phase-0-foundations.md](phases/phase-0-foundations.md)) and the
@@ -263,6 +262,38 @@ definition, the `{value, sampleSize, reliable}` stat shape, one parameterized di
 scope, and the stacked-tables page layout). No real outreach outcome data exists yet — same
 `VERIFIER_REJECTED` blocker Phases 8-10 already hit — so `/analytics` has only been verified
 against seeded fixture data.
+
+Phase 14 added the remaining operator-safety and data-stewardship requirements PLAN.md scoped for
+"before trusting the system with real, ongoing use," with no new Claude-invoking agent — every
+new module this phase is deterministic TypeScript. A new `exclusion_rules` table
+(domain/industry/country, spec §61) is checked live by `discoverHandler.ts` and, authoritatively,
+by `prescreenHandler.ts` right before every Claude call; permanent single-company exclusion reuses
+the existing `companies.lifecycleStatus = "EXCLUDED"` special case plus a new
+`dashboardActions.excludeCompany`. `src/lib/doNotContact.ts` is a single predicate both
+`contactHandler.ts` (skips enqueueing `WRITE_OUTREACH`, the acceptance-criteria requirement) and
+`outreachHandler.ts` (a defensive re-check) call for spec §65. `REFRESH_EVIDENCE` finally has a
+real handler (`refreshEvidenceHandler.ts`, reusing `researchHandler.ts`'s evidence-persistence
+rule via a new shared `researchEvidence.ts`) topped up every worker cycle by a new
+`ensureRefreshEvidenceWork`, batch-capped at 3 — spec §60 re-research is now actually wired end to
+end, not just the freshness-window math Phase 5 built. `system_config` gained two operator-facing
+keys (the spec §32 gate's threshold/floor/high-risk policy, and the re-research window), exposed
+on a new `/settings` dashboard page alongside exclusion-rule management, one-click backup
+(`src/lib/backup.ts`, `better-sqlite3`'s own `.backup()` API), and JSON/CSV export links
+(`src/lib/exportData.ts`, `/api/export`) — spec §79/§80/§70. A CLI-only seed/test mode
+(`scripts/seed.ts`, spec §99) drives known company URLs through screening -> research -> analysis
+-> verification -> offer creation by calling each stage's real handler directly, distinct from
+Phase 12's manual-research entry point (which deliberately skips screening). Verified via 90+ new
+unit/fixture tests across 8 new test files plus extensions to 7 existing ones, a real
+backup/corrupt/restore round-trip, a real multi-format export against seeded data, real CLI smoke
+runs of every new script, and 2 new Playwright scenarios (9/9 passing) covering the new dashboard
+UI end-to-end in a real browser — see
+[phase-14-operational-hardening.md](phases/phase-14-operational-hardening.md) and new ADR-0021 for
+the ten judgment calls made (the exclusion split between `exclusion_rules` and
+`lifecycleStatus`/`EXCLUDED`, the two-enforcement-point pattern shared by exclusion and DNC, why
+`REFRESH_EVIDENCE` never transitions `lifecycleStatus`, the deliberately narrow two-key
+`system_config` expansion, seed mode's CLI-only scope, the backup/restore API choices, the export
+shape, the `/settings` page's scope, and the observability/secret-handling pass's single targeted
+fix).
 
 Full detail for every phase (objective, acceptance criteria, explicit exclusions) lives in
 [../PLAN.md](../PLAN.md). This file only tracks status. When a phase finishes, its

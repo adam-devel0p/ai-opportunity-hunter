@@ -6,13 +6,17 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../db/migrate.js";
 import type { Db } from "../db/client.js";
 import { companies, contacts, opportunities, outreachDrafts, outreachOutcomes, workItems } from "../db/schema.js";
+import { TASK_TYPE_PRIORITY } from "../pipeline/priority.js";
 import {
   approveOpportunity,
+  excludeCompany,
   markDraftReviewed,
   markSentManually,
   recordOutreachOutcome,
   rejectOpportunity,
   requestManualResearch,
+  setCompanyDoNotContact,
+  setContactDoNotContact,
 } from "./dashboardActions.js";
 
 let dir: string;
@@ -225,5 +229,59 @@ describe("requestManualResearch", () => {
     });
     const outcome = requestManualResearch(db, { website: "https://acme-plumbing.example" });
     expect(outcome).toMatchObject({ kind: "already-progressed", lifecycleStatus: "RESEARCHED" });
+  });
+});
+
+describe("excludeCompany", () => {
+  it("sets lifecycleStatus EXCLUDED and records the reason", () => {
+    const company = seedCompany({ lifecycleStatus: "PRESCREEN_PENDING" });
+    excludeCompany(db, company.id, "Operator asked never to be contacted again.");
+
+    const updated = db.select().from(companies).where(eq(companies.id, company.id)).get();
+    expect(updated?.lifecycleStatus).toBe("EXCLUDED");
+    expect(updated?.exclusionReason).toBe("Operator asked never to be contacted again.");
+  });
+
+  it("cancels this company's own not-yet-run PRESCREEN/RESEARCH work items", () => {
+    const company = seedCompany({ lifecycleStatus: "PRESCREEN_PENDING" });
+    db.insert(workItems)
+      .values({
+        taskType: "PRESCREEN",
+        entityId: company.id,
+        status: "PENDING",
+        priority: TASK_TYPE_PRIORITY.PRESCREEN,
+      })
+      .run();
+
+    excludeCompany(db, company.id);
+
+    const items = db.select().from(workItems).where(eq(workItems.entityId, company.id)).all();
+    expect(items[0]?.status).toBe("CANCELLED");
+  });
+
+  it("throws for an unknown company id", () => {
+    expect(() => excludeCompany(db, "no-such-company")).toThrow(/No company/);
+  });
+});
+
+describe("setCompanyDoNotContact / setContactDoNotContact", () => {
+  it("toggles a company's DO_NOT_CONTACT flag", () => {
+    const company = seedCompany();
+    setCompanyDoNotContact(db, company.id, true);
+    expect(db.select().from(companies).where(eq(companies.id, company.id)).get()?.doNotContact).toBe(true);
+
+    setCompanyDoNotContact(db, company.id, false);
+    expect(db.select().from(companies).where(eq(companies.id, company.id)).get()?.doNotContact).toBe(false);
+  });
+
+  it("toggles a specific contact's DO_NOT_CONTACT flag", () => {
+    const company = seedCompany();
+    const contact = seedContact(company.id);
+    setContactDoNotContact(db, contact.id, true);
+    expect(db.select().from(contacts).where(eq(contacts.id, contact.id)).get()?.doNotContact).toBe(true);
+  });
+
+  it("throws for an unknown contact id", () => {
+    expect(() => setContactDoNotContact(db, "no-such-contact", true)).toThrow(/No contact/);
   });
 });

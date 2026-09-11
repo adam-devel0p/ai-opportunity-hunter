@@ -213,6 +213,59 @@ describe("runFindContactTask", () => {
     expect(contactRow?.email).toBeNull();
   });
 
+  it("does not enqueue WRITE_OUTREACH when the company is DO_NOT_CONTACT, but still records the contact", async () => {
+    const company = seedCompany({ doNotContact: true });
+    const opportunity = seedOpportunity(company.id);
+    const workItem = seedRunningWorkItem(opportunity.id);
+
+    const outcome = await runFindContactTask({
+      db,
+      workItem,
+      runContact: async () => success(publiclyListedContact),
+    });
+
+    expect(outcome.workItemStatus).toBe("COMPLETED");
+    expect(outcome.doNotContact).toBe(true);
+    expect(outcome.createdWriteOutreachWorkItemId).toBeNull();
+
+    const contactRow = db.select().from(contacts).where(eq(contacts.companyId, company.id)).get();
+    expect(contactRow?.name).toBe("Jane Doe");
+
+    expect(db.select().from(workItems).where(eq(workItems.taskType, "WRITE_OUTREACH")).all()).toHaveLength(0);
+  });
+
+  it("inherits DO_NOT_CONTACT onto a freshly-found contact row for the same email a prior contact was opted out on", async () => {
+    const company = seedCompany();
+    db.insert(contacts)
+      .values({
+        companyId: company.id,
+        name: "Jane Doe",
+        emailConfidence: "PUBLICLY_LISTED",
+        email: "Jane.Doe@northgate-recruitment.example",
+        doNotContact: true,
+      })
+      .run();
+    const opportunity = seedOpportunity(company.id);
+    const workItem = seedRunningWorkItem(opportunity.id);
+
+    const outcome = await runFindContactTask({
+      db,
+      workItem,
+      runContact: async () => success(publiclyListedContact),
+    });
+
+    expect(outcome.doNotContact).toBe(true);
+    expect(outcome.createdWriteOutreachWorkItemId).toBeNull();
+
+    const newContactRow = db
+      .select()
+      .from(contacts)
+      .where(eq(contacts.companyId, company.id))
+      .all()
+      .find((c) => c.name === "Jane Doe" && c.source !== null);
+    expect(newContactRow?.doNotContact).toBe(true);
+  });
+
   it("passes quota_exhausted through as DEFERRED, without mutating the opportunity or counting a failed attempt", async () => {
     const company = seedCompany();
     const opportunity = seedOpportunity(company.id);

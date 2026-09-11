@@ -10,7 +10,13 @@ import {
   setAutonomousMode,
   getCampaignSelectionState,
   setCampaignSelectionState,
+  getOpportunityGateConfig,
+  setOpportunityGateConfig,
+  getReResearchWindowMs,
+  setReResearchWindowMs,
 } from "./config.js";
+import { DEFAULT_OPPORTUNITY_GATE_CONFIG } from "./opportunityGate.js";
+import { DEFAULT_RESEARCH_FRESHNESS_WINDOW_MS } from "./researchFreshness.js";
 
 let dir: string;
 let db: Db;
@@ -68,5 +74,41 @@ describe("campaign selection state", () => {
 
     expect(getCampaignSelectionState(db)).toEqual({});
     expect(getAutonomousMode(db)).toBe(true);
+  });
+});
+
+describe("opportunity gate config", () => {
+  it("defaults to DEFAULT_OPPORTUNITY_GATE_CONFIG when unset", () => {
+    expect(getOpportunityGateConfig(db)).toEqual(DEFAULT_OPPORTUNITY_GATE_CONFIG);
+  });
+
+  it("round-trips a custom config", () => {
+    const custom = { scoreThreshold: 80, evidenceStrengthFloor: 12, allowHighRisk: true };
+    setOpportunityGateConfig(db, custom);
+    expect(getOpportunityGateConfig(db)).toEqual(custom);
+  });
+
+  it("falls back to the default for a malformed stored value", () => {
+    db.insert(systemConfig)
+      .values({ key: "opportunityGateConfig", value: { scoreThreshold: "not-a-number" }, updatedAt: new Date() })
+      .run();
+    expect(getOpportunityGateConfig(db)).toEqual(DEFAULT_OPPORTUNITY_GATE_CONFIG);
+  });
+});
+
+describe("re-research window", () => {
+  it("defaults to DEFAULT_RESEARCH_FRESHNESS_WINDOW_MS when unset", () => {
+    expect(getReResearchWindowMs(db)).toBe(DEFAULT_RESEARCH_FRESHNESS_WINDOW_MS);
+  });
+
+  it("round-trips a custom value", () => {
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    setReResearchWindowMs(db, oneDayMs);
+    expect(getReResearchWindowMs(db)).toBe(oneDayMs);
+  });
+
+  it("falls back to the default for a non-positive stored value", () => {
+    setReResearchWindowMs(db, -5);
+    expect(getReResearchWindowMs(db)).toBe(DEFAULT_RESEARCH_FRESHNESS_WINDOW_MS);
   });
 });

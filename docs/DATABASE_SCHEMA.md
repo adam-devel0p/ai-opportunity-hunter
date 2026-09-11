@@ -37,8 +37,8 @@ Identity + lifecycle for a discovered business (spec §14, §56).
 | nextEligibleResearchAt | timestamp | nullable — re-research window, spec §60 |
 | sourceCampaignId | text fk → discovery_campaigns.id | |
 | lifecycleStatus | enum | `DISCOVERED \| PRESCREEN_PENDING \| PRESCREENED \| RESEARCH_PENDING \| RESEARCHED \| NO_OPPORTUNITY \| DISCARDED \| EXCLUDED` — the company-level portion of spec §90's flow only. See "Splitting spec §90 across tables" below. |
-| exclusionReason | text | nullable |
-| doNotContact | boolean | default false — spec §65 |
+| exclusionReason | text | nullable — set by `dashboardActions.excludeCompany` or an `exclusion_rules` match (Phase 14) |
+| doNotContact | boolean | default false — spec §65, enforced in `contactHandler.ts`/`outreachHandler.ts` (Phase 14, `src/lib/doNotContact.ts`) |
 | notes | text | nullable, operator-editable |
 
 **Domain normalization** (spec §17, implemented as a pure function in `src/lib/normalize.ts`,
@@ -211,7 +211,7 @@ Spec §37-38.
 | email | text | nullable |
 | emailSource | text | nullable |
 | emailConfidence | enum | `PUBLICLY_LISTED \| VERIFIED \| GUESSED \| UNKNOWN` |
-| doNotContact | boolean | default false, spec §65 |
+| doNotContact | boolean | default false, spec §65, enforced Phase 14 (`src/lib/doNotContact.ts`) |
 
 Enforcement note (spec §38 "never represent a guessed email as verified"): this is enforced
 at the query/serialization layer, not just the UI — any code path rendering a "verified"
@@ -262,12 +262,33 @@ The queue, spec §48-49.
 | startedAt | timestamp | nullable — used for stuck-RUNNING crash recovery, spec §67 |
 | completedAt | timestamp | nullable |
 
+## `exclusion_rules`
+
+Spec §61, added Phase 14. Persistent domain/industry/country blocks, enforced live by
+`discoverHandler.ts` (new candidates) and `prescreenHandler.ts` (already-known companies, so a
+rule added after discovery still takes effect before the next Claude call — see ADR-0021).
+Permanent single-company exclusion doesn't use this table — it's `companies.lifecycleStatus =
+"EXCLUDED"` directly (`stateMachine.ts`'s EXCLUDED special case), set by
+`dashboardActions.excludeCompany`.
+
+| column | type | notes |
+|---|---|---|
+| id | text pk | |
+| type | enum | `DOMAIN \| INDUSTRY \| COUNTRY` |
+| value | text | normalized the same way as `companies.normalizedDomain` for `DOMAIN`; trimmed free text otherwise |
+| reason | text | nullable |
+
 ## `system_config`
 
-Spec §70, key-value with typed accessors in `src/lib/config.ts`. Holds: autonomous
-mode on/off, country/industry allowlists, size range, score threshold, model aliases,
-discovery volume, research depth, min confidence, pricing bands, re-research interval,
-max simultaneous work, daily limits.
+Spec §70, key-value with typed accessors in `src/lib/config.ts`. Keys actually implemented as of
+Phase 14: autonomous mode on/off (Phase 11), the campaign-selection round-robin state (Phase 11),
+the spec §32 strong-opportunity gate's threshold/floor/high-risk policy (Phase 14 —
+`getOpportunityGateConfig`/`setOpportunityGateConfig`), and the spec §60 re-research freshness
+window in ms (Phase 14 — `getReResearchWindowMs`/`setReResearchWindowMs`). DATABASE_SCHEMA.md's
+originally-listed eventual key set (country/industry allowlists, size range, model aliases,
+discovery volume, research depth, min confidence, pricing bands, max simultaneous work, daily
+limits) remains unimplemented — see ADR-0021 for why country/industry allowlisting specifically
+was built as `exclusion_rules` instead of a `system_config` key.
 
 ## `prompt_versions`
 

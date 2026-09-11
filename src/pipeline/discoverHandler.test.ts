@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../db/migrate.js";
 import type { Db } from "../db/client.js";
 import { companies, discoveryCampaigns, workItems } from "../db/schema.js";
+import { addExclusionRule } from "../lib/exclusions.js";
 import type {
   DiscoveryOutput,
   RunDiscoveryAgentInput,
@@ -245,6 +246,110 @@ describe("runDiscoverTask", () => {
     const row = db.select().from(workItems).where(eq(workItems.id, workItem.id)).get();
     expect(row?.status).toBe("FAILED");
     expect(row?.attempts).toBe(3);
+  });
+
+  it("inserts a newly-discovered company straight at EXCLUDED when it matches a domain rule, without enqueueing PRESCREEN", async () => {
+    const campaign = seedCampaign();
+    addExclusionRule(db, { type: "DOMAIN", value: "blocked.example", reason: "Operator blacklisted this site." });
+    const workItem = seedRunningWorkItem(campaign.id);
+
+    const outcome = await runDiscoverTask({
+      db,
+      workItem,
+      runDiscovery: async () =>
+        success({
+          companies: [
+            {
+              name: "Blocked Co",
+              website: "https://blocked.example",
+              country: "UK",
+              industry: "recruitment",
+              description: "n/a",
+              sizeEstimate: null,
+              reasonToScreen: "n/a",
+            },
+          ],
+        }),
+    });
+
+    expect(outcome.workItemStatus).toBe("COMPLETED");
+    expect(outcome.insertedCompanyIds).toEqual([]);
+    expect(outcome.excludedCompanyIds).toHaveLength(1);
+
+    const company = db.select().from(companies).where(eq(companies.normalizedDomain, "blocked.example")).get();
+    expect(company?.lifecycleStatus).toBe("EXCLUDED");
+    expect(company?.exclusionReason).toContain("Operator blacklisted this site.");
+
+    expect(db.select().from(workItems).where(eq(workItems.taskType, "PRESCREEN")).all()).toHaveLength(0);
+  });
+
+  it("inserts a newly-discovered company straight at EXCLUDED when it matches an industry/country rule", async () => {
+    const campaign = seedCampaign();
+    addExclusionRule(db, { type: "COUNTRY", value: "RU" });
+    const workItem = seedRunningWorkItem(campaign.id);
+
+    const outcome = await runDiscoverTask({
+      db,
+      workItem,
+      runDiscovery: async () =>
+        success({
+          companies: [
+            {
+              name: "Moscow Co",
+              website: "https://moscow-co.example",
+              country: "RU",
+              industry: "recruitment",
+              description: "n/a",
+              sizeEstimate: null,
+              reasonToScreen: "n/a",
+            },
+          ],
+        }),
+    });
+
+    expect(outcome.excludedCompanyIds).toHaveLength(1);
+    const company = db.select().from(companies).where(eq(companies.normalizedDomain, "moscow-co.example")).get();
+    expect(company?.lifecycleStatus).toBe("EXCLUDED");
+  });
+
+  it("retroactively excludes an already-known company on rediscovery once a matching rule exists", async () => {
+    const campaign = seedCampaign();
+    const [existingCompany] = db
+      .insert(companies)
+      .values({
+        name: "Gambling Co",
+        normalizedDomain: "gambling-co.example",
+        website: "https://gambling-co.example",
+        industry: "gambling",
+        lifecycleStatus: "PRESCREEN_PENDING",
+        sourceCampaignId: campaign.id,
+      })
+      .returning()
+      .all();
+    addExclusionRule(db, { type: "INDUSTRY", value: "gambling" });
+    const workItem = seedRunningWorkItem(campaign.id);
+
+    await runDiscoverTask({
+      db,
+      workItem,
+      runDiscovery: async () =>
+        success({
+          companies: [
+            {
+              name: "Gambling Co",
+              website: "https://gambling-co.example",
+              country: "UK",
+              industry: "gambling",
+              description: "n/a",
+              sizeEstimate: null,
+              reasonToScreen: "n/a",
+            },
+          ],
+        }),
+    });
+
+    const row = db.select().from(companies).where(eq(companies.id, existingCompany!.id)).get();
+    expect(row?.lifecycleStatus).toBe("EXCLUDED");
   });
 
   it("handles a discovery result with zero companies without error", async () => {

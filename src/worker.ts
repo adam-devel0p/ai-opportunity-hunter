@@ -22,8 +22,14 @@
 
 import { eq } from "drizzle-orm";
 import { createDb, type Db } from "./db/client.js";
-import { discoveryCampaigns, workItems } from "./db/schema.js";
-import { getAutonomousMode, getCampaignSelectionState, setCampaignSelectionState } from "./lib/config.js";
+import { companies, discoveryCampaigns, workItems } from "./db/schema.js";
+import {
+  getAutonomousMode,
+  getCampaignSelectionState,
+  getOpportunityGateConfig,
+  getReResearchWindowMs,
+  setCampaignSelectionState,
+} from "./lib/config.js";
 import { warnIfApiKeyPresent } from "./agents/claudeClient.js";
 import { runDiscoverTask } from "./pipeline/discoverHandler.js";
 import { runPrescreenTask } from "./pipeline/prescreenHandler.js";
@@ -33,6 +39,7 @@ import { runVerifyTask } from "./pipeline/verifyHandler.js";
 import { runBuildOfferTask } from "./pipeline/offerHandler.js";
 import { runFindContactTask } from "./pipeline/contactHandler.js";
 import { runWriteOutreachTask } from "./pipeline/outreachHandler.js";
+import { runRefreshEvidenceTask } from "./pipeline/refreshEvidenceHandler.js";
 import { selectNextCampaign } from "./pipeline/campaignSelection.js";
 import { resolveFailureOutcome } from "./pipeline/failureClassification.js";
 import { selectNextWorkItem, TASK_TYPE_PRIORITY, type TaskType } from "./pipeline/priority.js";
@@ -92,31 +99,25 @@ export type TaskHandler = (
   dbPath: string,
 ) => Promise<HandlerOutcome>;
 
-/**
- * `REFRESH_EVIDENCE` has no handler yet (Phase 14, spec §60 re-research) and nothing in the
- * pipeline creates one today — this branch should be unreachable in practice. Fails the item
- * loudly instead of throwing, so a stray item can't crash the loop (spec §66) or spin forever.
- */
-const runRefreshEvidenceTask: TaskHandler = async (db, workItem, now) => {
-  const message = "REFRESH_EVIDENCE has no handler yet (Phase 14 scope).";
-  const nextStatus = transitionWorkItemStatus(workItem.status, "FAILED");
-  db.update(workItems)
-    .set({ status: nextStatus, lastError: message, updatedAt: now })
-    .where(eq(workItems.id, workItem.id))
-    .run();
-  return { workItemStatus: nextStatus, error: message };
-};
-
 export const TASK_HANDLERS: Record<TaskType, TaskHandler> = {
   DISCOVER: (db, workItem, now) => runDiscoverTask({ db, workItem, now }),
   PRESCREEN: (db, workItem, now) => runPrescreenTask({ db, workItem, now }),
-  RESEARCH: (db, workItem, now, dbPath) => runResearchTask({ db, workItem, now, dbPath }),
+  RESEARCH: (db, workItem, now, dbPath) =>
+    runResearchTask({ db, workItem, now, dbPath, reResearchWindowMs: getReResearchWindowMs(db) }),
   ANALYZE: (db, workItem, now) => runAnalyzeTask({ db, workItem, now }),
-  VERIFY: (db, workItem, now) => runVerifyTask({ db, workItem, now }),
+  VERIFY: (db, workItem, now) =>
+    runVerifyTask({ db, workItem, now, gateConfig: getOpportunityGateConfig(db) }),
   BUILD_OFFER: (db, workItem, now) => runBuildOfferTask({ db, workItem, now }),
   FIND_CONTACT: (db, workItem, now) => runFindContactTask({ db, workItem, now }),
   WRITE_OUTREACH: (db, workItem, now) => runWriteOutreachTask({ db, workItem, now }),
-  REFRESH_EVIDENCE: runRefreshEvidenceTask,
+  REFRESH_EVIDENCE: (db, workItem, now, dbPath) =>
+    runRefreshEvidenceTask({
+      db,
+      workItem,
+      now,
+      dbPath,
+      reResearchWindowMs: getReResearchWindowMs(db),
+    }),
 };
 
 // --- startup: crash recovery (spec §67) -------------------------------------
@@ -204,6 +205,80 @@ export function ensureDiscoveryWork(db: Db, now: Date = new Date()): string | nu
   return item?.id ?? null;
 }
 
+// --- per-cycle: keep re-research (evidence refresh) work flowing -------------
+
+const REFRESH_EVIDENCE_IN_FLIGHT_STATUSES: readonly WorkItemStatus[] = [
+  "PENDING",
+  "RUNNING",
+  "RETRYABLE",
+  "DEFERRED",
+];
+
+const REFRESHABLE_LIFECYCLE_STATUSES = ["RESEARCHED", "NO_OPPORTUNITY"] as const;
+
+/** Caps how many `REFRESH_EVIDENCE` items this enqueues per cycle — unlike DISCOVER (at most one
+ * ever in flight), several companies can legitimately become re-research-eligible around the same
+ * time, but enqueueing all of them at once the moment a freshness window rolls over would spend a
+ * burst of Claude quota that spec §49's priority ordering already ranks below every in-flight
+ * opportunity's own progression. A small per-cycle batch spreads that out instead. */
+export const DEFAULT_REFRESH_EVIDENCE_BATCH_SIZE = 3;
+
+/**
+ * Spec §60 re-research: unlike every other task type, nothing enqueues `REFRESH_EVIDENCE`
+ * automatically as a side effect of finishing an earlier stage (there is no earlier stage — a
+ * company only becomes eligible once its own `nextEligibleResearchAt` window, set by the last
+ * `RESEARCH`/`REFRESH_EVIDENCE` run, has passed). Same "the worker itself tops this up every
+ * cycle" pattern as `ensureDiscoveryWork` above (ADR-0018), scanning `RESEARCHED`/
+ * `NO_OPPORTUNITY` companies whose window has passed and that don't already have a
+ * `REFRESH_EVIDENCE` item in flight.
+ */
+export function ensureRefreshEvidenceWork(
+  db: Db,
+  now: Date = new Date(),
+  batchSize: number = DEFAULT_REFRESH_EVIDENCE_BATCH_SIZE,
+): string[] {
+  const inFlightCompanyIds = new Set(
+    db
+      .select({ entityId: workItems.entityId, status: workItems.status })
+      .from(workItems)
+      .where(eq(workItems.taskType, "REFRESH_EVIDENCE"))
+      .all()
+      .filter((row) => REFRESH_EVIDENCE_IN_FLIGHT_STATUSES.includes(row.status))
+      .map((row) => row.entityId),
+  );
+
+  const eligibleCompanies = db
+    .select()
+    .from(companies)
+    .all()
+    .filter(
+      (company) =>
+        REFRESHABLE_LIFECYCLE_STATUSES.includes(
+          company.lifecycleStatus as (typeof REFRESHABLE_LIFECYCLE_STATUSES)[number],
+        ) &&
+        company.nextEligibleResearchAt !== null &&
+        company.nextEligibleResearchAt.getTime() <= now.getTime() &&
+        !inFlightCompanyIds.has(company.id),
+    )
+    .slice(0, batchSize);
+
+  const createdIds: string[] = [];
+  for (const company of eligibleCompanies) {
+    const [item] = db
+      .insert(workItems)
+      .values({
+        taskType: "REFRESH_EVIDENCE",
+        entityId: company.id,
+        status: "PENDING",
+        priority: TASK_TYPE_PRIORITY.REFRESH_EVIDENCE,
+      })
+      .returning()
+      .all();
+    if (item) createdIds.push(item.id);
+  }
+  return createdIds;
+}
+
 // --- one cycle ---------------------------------------------------------------
 
 export type WorkerCycleResult =
@@ -257,6 +332,7 @@ export async function runWorkerCycle(
   }
 
   ensureDiscoveryWork(db, now);
+  ensureRefreshEvidenceWork(db, now);
 
   const allItems = db.select().from(workItems).all();
   const next = selectNextWorkItem(allItems, now);

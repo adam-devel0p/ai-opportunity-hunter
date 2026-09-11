@@ -4,13 +4,13 @@ This file describes what is **actually built**, as of the last completed phase. 
 the plan (see [../PLAN.md](../PLAN.md) for that) — it's updated at the end of every phase to
 reflect reality. If this file and the code disagree, the code wins; fix this file.
 
-**Last updated:** Phase 13 (Feedback loop & outcome analytics) — complete. See
-[phases/phase-13-feedback-loop-analytics.md](phases/phase-13-feedback-loop-analytics.md) for the
+**Last updated:** Phase 14 (Operational hardening) — complete, the last planned phase. See
+[phases/phase-14-operational-hardening.md](phases/phase-14-operational-hardening.md) for the
 full writeup.
 
 ## Status
 
-Phases 0-13 are done. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
+Phases 0-14 are done — every phase PLAN.md planned in detail. The repo has a working TypeScript toolchain, the Phase 0 Claude-invocation
 client, a full SQLite schema (Drizzle) plus the deterministic domain logic (domain
 normalization/dedupe, opportunity scoring) from Phase 1, the Phase 2 queue/state-machine
 primitives (priority selection, lifecycle transition validation, failure classification, crash
@@ -55,8 +55,27 @@ just wire up. And now Phase 13's feedback loop read side: `src/lib/outcomeAnalyt
 reply/meeting/win rates and average opportunity score, plus the same broken down by industry/
 country/problem category/campaign/price band — every rate/average hedged with its own sample size
 and a small-sample-size `reliable` flag, surfaced on a new `/analytics` dashboard page. No schema
-changes, no new agent. See the dedicated sections below. PLAN.md Phase 14 (operational hardening)
-onward from here.
+changes, no new agent. And now Phase 14's operational hardening: a new `exclusion_rules` table
+(spec §61 domain/industry/country blocks) checked live by `discoverHandler.ts` and, authoritatively,
+by `prescreenHandler.ts` right before every PRESCREEN Claude call, both via a shared pure matcher
+(`src/pipeline/exclusionCheck.ts`) and DB wrapper (`src/lib/exclusions.ts`); permanent
+single-company exclusion reuses the existing `companies.lifecycleStatus = "EXCLUDED"` transition
+plus a new `dashboardActions.excludeCompany`. A single DO_NOT_CONTACT predicate
+(`src/lib/doNotContact.ts`) is enforced both where it matters (`contactHandler.ts` skips
+enqueueing `WRITE_OUTREACH`) and defensively (`outreachHandler.ts` re-checks before calling
+Claude), spec §65. `REFRESH_EVIDENCE` finally has a real handler
+(`src/pipeline/refreshEvidenceHandler.ts`, spec §60) reusing `researchHandler.ts`'s
+evidence-persistence rule via a new shared `src/pipeline/researchEvidence.ts`, topped up every
+worker cycle by a new batch-capped `ensureRefreshEvidenceWork`. `src/lib/config.ts` gained two
+more `system_config`-backed accessors (the spec §32 gate's threshold/floor/high-risk policy, the
+re-research window), both wired live in `worker.ts`'s `TASK_HANDLERS` map and both editable from a
+new `/settings` dashboard page alongside exclusion-rule management, one-click backup
+(`src/lib/backup.ts`), and JSON/CSV export (`src/lib/exportData.ts`, `/api/export`). A CLI-only
+seed/test mode (`scripts/seed.ts`, `src/lib/seedCompanies.ts`, spec §99) drives known company URLs
+through the full screening-through-offer pipeline for prompt tuning. No new Claude-invoking agent
+this phase — everything added is deterministic TypeScript, same "Claude only where judgment is
+genuinely required" split the whole project follows. See the dedicated sections below and
+ADR-0021.
 
 ## Actual stack in use
 
@@ -172,7 +191,7 @@ src/
     models.ts                 Tier -> `--model` alias map (ADR-0006).
     models.test.ts
   db/
-    schema.ts                  Drizzle schema for all 13 tables (DATABASE_SCHEMA.md).
+    schema.ts                  Drizzle schema for all 14 tables (DATABASE_SCHEMA.md).
     client.ts                  `createDb(path)` — opens better-sqlite3 with WAL +
                                 foreign_keys pragmas, wraps it in Drizzle.
     migrate.ts                 `runMigrations(path)` — applies `drizzle/*.sql` via
@@ -261,14 +280,52 @@ src/
                                   blacklist — freely reversible, no state-machine restriction)
                                   plus `setCampaignPriority`.
     campaigns.test.ts
-    config.ts                     `getAutonomousMode`/`setAutonomousMode` (spec §71, Phase 11)
-                                   and `getCampaignSelectionState`/`setCampaignSelectionState`
+    config.ts                     `getAutonomousMode`/`setAutonomousMode` (spec §71, Phase 11),
+                                   `getCampaignSelectionState`/`setCampaignSelectionState`
                                    (persists `campaignSelection.ts`'s SWRR weights across worker
-                                   restarts) — a deliberately minimal `system_config` accessor,
-                                   scoped to exactly these two keys (ADR-0018 part 4). Every other
-                                   `system_config` key DATABASE_SCHEMA.md eventually wants remains
-                                   unwritten; Phase 14 owns the general config layer.
+                                   restarts), and, since Phase 14,
+                                   `getOpportunityGateConfig`/`setOpportunityGateConfig` (wires a
+                                   live value into `opportunityGate.ts`'s already-parameterized
+                                   config, spec §32/§70) and
+                                   `getReResearchWindowMs`/`setReResearchWindowMs` (same for
+                                   `researchFreshness.ts`, spec §60/§70) — every accessor falls
+                                   back to its module's own code-constant default on an unset or
+                                   malformed stored value. `worker.ts`'s `TASK_HANDLERS` map reads
+                                   both live every cycle. The remaining `system_config` keys
+                                   DATABASE_SCHEMA.md's original wishlist names (country/industry
+                                   allowlists as a `system_config` key specifically, pricing bands,
+                                   discovery volume, research depth, min confidence, max
+                                   simultaneous work, daily limits) remain unwritten (ADR-0021
+                                   part 5).
     config.test.ts
+    exclusions.ts                  `exclusion_rules` CRUD + `checkExclusion` (spec §61, Phase 14)
+                                    — the DB-wired wrapper around
+                                    `src/pipeline/exclusionCheck.ts`'s pure matcher that
+                                    `discoverHandler.ts`/`prescreenHandler.ts` call. Loads every
+                                    rule fresh on each check (ADR-0021 part 1/2).
+    exclusions.test.ts
+    doNotContact.ts                 `isDoNotContact` (spec §65, Phase 14) — the single predicate
+                                     both `contactHandler.ts` (skip enqueueing `WRITE_OUTREACH`)
+                                     and `outreachHandler.ts` (defensive re-check) call, so the
+                                     rule can't drift between the two sites (ADR-0021 part 3).
+    doNotContact.test.ts
+    seedCompanies.ts                 `seedCompanyForTesting` (spec §99, Phase 14) — inserts a
+                                      company at `PRESCREEN_PENDING` + enqueues a `PRESCREEN` item
+                                      from a CLI-supplied URL, mirroring `discoverHandler.ts`'s own
+                                      per-candidate insert logic exactly (`sourceCampaignId` stays
+                                      null). Distinct from `dashboardActions.requestManualResearch`
+                                      (spec §72), which skips screening — see ADR-0021 part 6.
+    seedCompanies.test.ts
+    backup.ts                        `backupDatabase`/`restoreDatabase` (spec §80, Phase 14) —
+                                      `better-sqlite3`'s own `.backup()` API for a WAL-safe
+                                      point-in-time snapshot; restore is a plain file copy plus
+                                      stale `-wal`/`-shm` sidecar cleanup (ADR-0021 part 7).
+    backup.test.ts
+    exportData.ts                    `buildExportBundle`/`bundleToJson`/`exportEntityCsv` (spec
+                                      §79, Phase 14) — companies/opportunities/contacts/
+                                      outreach-drafts/outreach-outcomes as one bundle; CSV
+                                      serializes nested JSON columns inline (ADR-0021 part 8).
+    exportData.test.ts
     dashboardQueries.ts            Read-side queries for the Phase 12 dashboard (spec §42-44,
                                     §73): `getSummaryMetrics`, `listOpportunities`,
                                     `getOpportunityDetail`, `listCompanies`, `getCompanyDetail`,
@@ -321,6 +378,16 @@ src/
                                   `resolveFailureOutcome` tying both to a state-machine-validated
                                   work-item update.
     failureClassification.test.ts
+    exclusionCheck.ts             `checkExclusionRules` (spec §61, Phase 14) — pure, exact
+                                   (case-insensitive) DOMAIN/INDUSTRY/COUNTRY matcher over a
+                                   candidate; no DB, no Claude call. `src/lib/exclusions.ts` is the
+                                   DB-wired caller.
+    exclusionCheck.test.ts
+    researchEvidence.ts           `persistVerifiedEvidence`/`urlsMatch` (Phase 14) — the
+                                   provenance-verified evidence-persistence rule factored out of
+                                   `researchHandler.ts` (no behavior change) so
+                                   `refreshEvidenceHandler.ts` can reuse it exactly (ADR-0021
+                                   part 4).
     crashRecovery.ts             `findStuckRunningItems` / `planStuckWorkItemRecovery` (spec
                                   §67) — pure functions; not yet wired to a live DB or called
                                   anywhere (Phase 11's `worker.ts` calls this at startup).
@@ -340,21 +407,31 @@ src/
                                   enqueues a `PRESCREEN` work item per new company, and
                                   finalizes the `DISCOVER` item (`COMPLETED`, or `DEFERRED` on
                                   quota exhaustion, or routed through `failureClassification`
-                                  on other failures — ADR-0010 part 5).
+                                  on other failures — ADR-0010 part 5). Since Phase 14, each new
+                                  candidate is also checked against live `exclusion_rules` before
+                                  insertion — a match inserts straight at `EXCLUDED` instead of
+                                  `PRESCREEN_PENDING`, no `PRESCREEN` item enqueued; an already-known
+                                  company is also re-checked on rediscovery (ADR-0021 part 2).
     discoverHandler.test.ts
     prescreenHandler.ts          `runPrescreenTask` (Phase 4) — the second live-DB-wired task
                                   handler: loads the company a `PRESCREEN` work item targets
                                   (`entityId` is a company id here, per DATABASE_SCHEMA.md's
-                                  default), short-circuits to `DISCARDED` without ever calling
-                                  Claude if `nextEligibleResearchAt` hasn't passed yet (ADR-0011
-                                  part 3), otherwise runs the Pre-Screening Agent and acts on its
-                                  classification: `DISCARD` → company `DISCARDED`, nothing
-                                  re-queued; `MAYBE`/`PROMISING` (treated identically, ADR-0011
-                                  part 1) → company `PRESCREENED -> RESEARCH_PENDING` (one DB
-                                  write, ADR-0011 part 5) and a `RESEARCH` work item enqueued.
-                                  Classification + reasons appended to `companies.notes`
-                                  (ADR-0011 part 4). Quota exhaustion/other failures handled the
-                                  same way as `discoverHandler.ts`.
+                                  default). Since Phase 14, the *first* check is a live
+                                  `exclusion_rules` match (`src/lib/exclusions.ts`) — this is the
+                                  authoritative exclusion enforcement point, since it runs right
+                                  before every Claude call regardless of when the rule was added
+                                  (ADR-0021 part 2); a match transitions the company to `EXCLUDED`
+                                  without calling Claude. Otherwise short-circuits to `DISCARDED`
+                                  without ever calling Claude if `nextEligibleResearchAt` hasn't
+                                  passed yet (ADR-0011 part 3), otherwise runs the Pre-Screening
+                                  Agent and acts on its classification: `DISCARD` → company
+                                  `DISCARDED`, nothing re-queued; `MAYBE`/`PROMISING` (treated
+                                  identically, ADR-0011 part 1) → company
+                                  `PRESCREENED -> RESEARCH_PENDING` (one DB write, ADR-0011 part 5)
+                                  and a `RESEARCH` work item enqueued. Classification + reasons
+                                  appended to `companies.notes` (ADR-0011 part 4). Quota
+                                  exhaustion/other failures handled the same way as
+                                  `discoverHandler.ts`.
     prescreenHandler.test.ts
     researchHandler.ts           `runResearchTask` (Phase 5) — the third live-DB-wired task
                                   handler: loads the company a `RESEARCH` work item targets
@@ -451,9 +528,14 @@ src/
                                      `emailConfidence` inline. On success, collapses the
                                      opportunity `CONTACT_RESEARCH -> OUTREACH_READY` in one write,
                                      appends a summary to `companies.notes`, and enqueues a
-                                     `WRITE_OUTREACH` work item (Phase 10's agent). Quota
-                                     exhaustion/other failures handled the same way as every
-                                     earlier handler.
+                                     `WRITE_OUTREACH` work item (Phase 10's agent) — unless the
+                                     found contact (or the owning company) is `DO_NOT_CONTACT`
+                                     (`src/lib/doNotContact.ts`, spec §65, Phase 14), in which case
+                                     the contact is still recorded but no `WRITE_OUTREACH` item is
+                                     ever created; a prior contact for the same company/email
+                                     already marked DNC has that flag inherited onto the new row
+                                     (ADR-0021 part 3). Quota exhaustion/other failures handled the
+                                     same way as every earlier handler.
     contactHandler.test.ts
     outreachHandler.ts              `runWriteOutreachTask` (Phase 10) — the eighth and final
                                      live-DB-wired handler of the core pipeline: loads the
@@ -472,9 +554,25 @@ src/
                                      `companies.notes` — but, unlike every earlier handler, does
                                      NOT transition `opportunities.status` and enqueues no further
                                      work item (ADR-0017 part 5): sending is a manual operator
-                                     action, not this handler's job. Quota exhaustion/other
+                                     action, not this handler's job. Since Phase 14, a defensive
+                                     `isDoNotContact` re-check runs right before ever calling Claude
+                                     (COMPLETED, no draft, if it trips) — closes the race where a
+                                     `WRITE_OUTREACH` item was already queued before the operator
+                                     set DO_NOT_CONTACT (ADR-0021 part 3). Quota exhaustion/other
                                      failures handled the same way as every earlier handler.
     outreachHandler.test.ts
+    refreshEvidenceHandler.ts       `runRefreshEvidenceTask` (spec §60, Phase 14) — the
+                                     `REFRESH_EVIDENCE` handler `worker.ts` stubbed out through
+                                     Phase 11-13: loads a company already at `RESEARCHED`/
+                                     `NO_OPPORTUNITY` (throws otherwise), re-runs the Deep Research
+                                     Agent, and persists new evidence via the shared
+                                     `researchEvidence.ts` rule. Unlike `researchHandler.ts`, does
+                                     NOT transition `lifecycleStatus` (no
+                                     `RESEARCHED -> RESEARCHED` self-loop exists in
+                                     `stateMachine.ts`) — only updates `lastResearchedAt`/
+                                     `nextEligibleResearchAt` and enqueues a fresh `ANALYZE` item
+                                     (ADR-0021 part 4).
+    refreshEvidenceHandler.test.ts
   worker.ts                       The autonomous scheduler/worker loop (Phase 11, spec §50-51) —
                                    see the dedicated section below for the full breakdown
                                    (`recoverStuckWorkItems`, `ensureDiscoveryWork`,
@@ -563,6 +661,25 @@ scripts/
   autonomous.ts                  Toggles/reads `system_config`'s autonomous-mode flag (Phase 11,
                                  spec §71). `npm run autonomous -- --status | --enable |
                                  --disable`.
+  refreshEvidence.ts             Runs real `REFRESH_EVIDENCE` items (Phase 14, spec §60) via
+                                 `refreshEvidenceHandler.ts` — `--company <id>` or `--all
+                                 [--limit <n>]`, same shape as `research.ts`.
+  exclusions.ts                  Exclusion-rule CLI (Phase 14, spec §61): `add`/`list`/`remove`
+                                 over `exclusion_rules`, plus `exclude-company`/`do-not-contact`
+                                 wrapping `dashboardActions.ts`'s operator actions.
+  backup.ts                      `create [--out <path>]` / `restore <path> [--target <dbPath>]`
+                                 over `src/lib/backup.ts` (Phase 14, spec §80).
+  export.ts                      `--format json|csv [--out <path>]` over `src/lib/exportData.ts`
+                                 (Phase 14, spec §79) — JSON writes one combined file; CSV writes
+                                 one file per entity into a directory.
+  seed.ts                        Seed/test mode (Phase 14, spec §99): `add --urls <a,b,c>` (or
+                                 `--file <path>`) inserts companies at `PRESCREEN_PENDING` via
+                                 `src/lib/seedCompanies.ts`; `run` additionally drives each one
+                                 through PRESCREEN -> RESEARCH -> ANALYZE -> VERIFY -> BUILD_OFFER
+                                 in-process by calling each stage's real handler directly
+                                 (`--stop-after <STAGE>` to stop earlier), printing a trail and
+                                 stopping a given company early on DISCARD/exclusion/gate
+                                 failure/task failure.
   seedE2eFixture.ts              Seeds a deterministic full-pipeline fixture (company through an
                                  `OUTREACH_READY` opportunity with a `DRAFT` outreach draft) into
                                  `AOH_DB_PATH` via direct Drizzle inserts (Phase 12) — never
@@ -669,7 +786,7 @@ exists as of Phase 1, but nothing wires `claudeClient` to it yet).
 
 ## `src/db/` (Phase 1)
 
-- `schema.ts` — all 13 tables from `docs/DATABASE_SCHEMA.md` as Drizzle `sqliteTable`
+- `schema.ts` — all 14 tables from `docs/DATABASE_SCHEMA.md` as Drizzle `sqliteTable`
   definitions. IDs are `crypto.randomUUID()` (no extra cuid dependency). Enums use Drizzle's
   `text(col, { enum: [...] })` (TS-level literal union; no DB-level `CHECK`, see ADR-0008 part
   3). JSON-shaped columns (`criteria`, `impactAssumptions`, `dependencies`, `risks`,
@@ -755,12 +872,12 @@ orchestration themselves.
   state-machine transition. As of Phase 11, `src/worker.ts`'s `recoverStuckWorkItems` runs this
   once at startup against real `work_items` rows (see below).
 
-## `src/worker.ts` (Phase 11)
+## `src/worker.ts` (Phase 11, extended Phase 14)
 
 The autonomous scheduler/worker loop (spec §50-51) — the first phase to wire `priority.ts` and
 `crashRecovery.ts` to a live DB and to run every Phase 3-10 handler continuously rather than one
 at a time via a `scripts/*.ts` CLI invocation. See ADR-0018 for the judgment calls behind this
-design.
+design (Phase 11) and ADR-0021 for Phase 14's additions below.
 
 - `recoverStuckWorkItems(db, now, timeoutMs)` — runs once at worker startup: queries all
   `RUNNING` work items, applies `crashRecovery.ts`'s pure `planStuckWorkItemRecovery`, and writes
@@ -801,10 +918,17 @@ design.
   wrapper uses (`researchHandler.ts`'s `RunResearchTaskOptions.dbPath`, needed by the ADR-0004
   hook subprocess) — every other handler's closure simply ignores it, which TypeScript's
   structural function typing permits (ADR-0018 part 7).
-- `REFRESH_EVIDENCE`'s `TASK_HANDLERS` entry is a deterministic-failure stub (transitions the
-  item straight to `FAILED` with a clear `lastError`) rather than a real handler — Phase 14 scope,
-  and nothing currently creates such an item, so this branch should be unreachable in practice
-  (ADR-0018 part 8).
+- `TASK_HANDLERS`'s `VERIFY` and `RESEARCH`/`REFRESH_EVIDENCE` entries now read live
+  `system_config` values every cycle (`getOpportunityGateConfig(db)`, `getReResearchWindowMs(db)`)
+  before calling their handler, rather than always falling through to each module's code-constant
+  default — Phase 14, ADR-0021 part 5.
+- `REFRESH_EVIDENCE`'s `TASK_HANDLERS` entry is now the real `refreshEvidenceHandler.ts` (Phase
+  14, spec §60) instead of the Phase 11-13 deterministic-failure stub. `ensureRefreshEvidenceWork(db,
+  now, batchSize)` — called every cycle alongside `ensureDiscoveryWork` — is the new per-cycle
+  top-up: scans `RESEARCHED`/`NO_OPPORTUNITY` companies whose `nextEligibleResearchAt` has passed
+  and that don't already have a `REFRESH_EVIDENCE` item in flight, enqueueing up to
+  `DEFAULT_REFRESH_EVIDENCE_BATCH_SIZE` (3) per cycle — capped, unlike `ensureDiscoveryWork`'s
+  "at most one ever," since several companies can become eligible at once (ADR-0021 part 4).
 
 ## The dashboard (`src/app`, Phase 12)
 
@@ -822,11 +946,14 @@ so filters are just query params a server component reads).
   `./data/aoh.db`) is the same env var every other entry point already uses.
 - Pages: `/` (summary metrics, autonomous toggle, activity feed), `/opportunities` (list +
   filters), `/opportunities/[id]` (full card, evidence UX, trust panel, every operator action),
-  `/companies` (list + search), `/companies/[id]` (detail — mainly a landing page for manual
-  research), `/companies/new` (spec §72's entry form), `/analytics` (Phase 13's outcome analytics
-  — see the dedicated bullet below). Every list/detail page sets
-  `export const dynamic = "force-dynamic"` — this is a single-operator app reading live pipeline
-  state, and there is no reason for Next to ever serve a stale cached render of it.
+  `/companies` (list + search), `/companies/[id]` (detail — DO_NOT_CONTACT toggle and "Exclude
+  company" button since Phase 14, spec §61/§65), `/companies/new` (spec §72's entry form),
+  `/analytics` (Phase 13's outcome analytics — see the dedicated bullet below), `/settings` (Phase
+  14, spec §70/§61/§79-80 — exclusion-rule management, the spec §32 gate config, the re-research
+  window, one-click backup, JSON/CSV export links; see the dedicated bullet below). Every
+  list/detail page sets `export const dynamic = "force-dynamic"` — this is a single-operator app
+  reading live pipeline state, and there is no reason for Next to ever serve a stale cached render
+  of it.
 - Spec §85's six trust labels (WHY CLAUDE LIKES THIS / WHY THE SKEPTIC MIGHT REJECT IT / WHAT WE
   KNOW / WHAT WE INFER / WHAT WE DON'T KNOW / WHAT TO VERIFY) are populated from fields that
   already existed on `opportunities`/`opportunity_evaluations` — no agent was re-prompted for
@@ -858,12 +985,25 @@ so filters are just query params a server component reads).
   sources. `tsconfig.json` (Next-owned, auto-edited by Next on every run) covers `src/app`;
   `tsconfig.backend.json` (the pre-Phase-12 `tsconfig.json`, renamed) covers everything else. See
   ADR-0019 part 1 for the full reasoning and what would let this be simplified later.
-- Playwright (`playwright.config.ts`, `e2e/dashboard.spec.ts`, `npm run test:e2e`): 7 scenarios
+- Playwright (`playwright.config.ts`, `e2e/dashboard.spec.ts`, `npm run test:e2e`): 9 scenarios
   run serially (`test.describe.serial`) against one real `next dev --webpack` server and a fresh
   fixture DB seeded by `scripts/seedE2eFixture.ts` (direct Drizzle inserts, never the real
   `claude` CLI — ADR-0019 part 9). Covers every PLAN.md Phase 12 acceptance-criterion scenario:
   viewing the full evidence trail, approve/reject with a reason, marking sent, toggling
-  autonomous mode, and manual company entry queuing a real (fixture-seeded) pipeline run.
+  autonomous mode, and manual company entry queuing a real (fixture-seeded) pipeline run, plus
+  (Phase 14) DO_NOT_CONTACT/exclude-company on the company page and exclusion-rule/gate-config
+  management on `/settings`.
+- `/settings` (Phase 14, spec §70): exclusion-rule add/remove (`src/lib/exclusions.ts`), the spec
+  §32 gate's threshold/floor/high-risk toggle and the spec §60 re-research window in days (both
+  `src/lib/config.ts`, converted to/from ms at the form boundary), a "Create backup now" button
+  (`src/lib/backup.ts`, writes to `./data/backups/`), and download links for `/api/export`
+  (`src/app/api/export/route.ts` — `?format=json` for the full bundle, `?format=csv&entity=<name>`
+  per entity, since CSV can't cleanly hold five differently-shaped tables in one file). Same
+  zero-client-JS plain-form pattern as every other page; new actions live in
+  `src/app/actions/settings.ts`. Company-level exclude/DO_NOT_CONTACT actions live on
+  `/companies/[id]` instead (`src/app/actions/companies.ts`'s `excludeCompanyAction`/
+  `setCompanyDoNotContactAction`) — spec §61/§65 act on one company, not global config (ADR-0021
+  part 9).
 - `/analytics` (Phase 13, spec §47/§74): reads `src/lib/outcomeAnalytics.ts` directly (same
   zero-client-JS server-component pattern as every other page). Overall metric tiles (sent count,
   four rates, average opportunity score), a score-vs-response comparison, and five stacked
@@ -969,11 +1109,13 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   `ensureDiscoveryWork`, with its round-robin state persisted in `system_config` (a new
   `src/lib/config.ts`, ADR-0018 part 4) — an operator can still run `scripts/discover.ts
   --campaign <id>` manually for a one-off campaign, but the worker no longer needs that.
-- `system_config` now has exactly two keys written by any code path (`autonomousMode`,
-  `campaignSelectionState`, both via `src/lib/config.ts`, Phase 11) — every other key
-  DATABASE_SCHEMA.md eventually wants (discovery volume, score threshold, pricing bands,
-  country/industry allowlists, ...) remains unwritten, same as before (ADR-0010 part 8, now also
-  ADR-0018 part 4). `prompt_versions` is still not written to by any code path (ADR-0010 part 9).
+- `system_config` now has four keys written by any code path (`autonomousMode`,
+  `campaignSelectionState` from Phase 11; `opportunityGateConfig`, `reResearchWindowMs` added
+  Phase 14, both via `src/lib/config.ts`) — every other key DATABASE_SCHEMA.md eventually wants
+  (discovery volume, pricing bands, country/industry allowlists specifically as a `system_config`
+  key, research depth, min confidence, max simultaneous work, daily limits) remains unwritten,
+  same as before (ADR-0010 part 8, ADR-0018 part 4, now also ADR-0021 part 5). `prompt_versions`
+  is still not written to by any code path (ADR-0010 part 9).
 - `companies.notes` is now used for several purposes: genuine operator notes, a seeded
   `"Discovery reason: ..."` string (Phase 3, ADR-0010 part 7), a `"Prescreen (...): ..."` line
   (Phase 4, ADR-0011 part 4), a `"Research: N evidence item(s) recorded..."` summary plus a
@@ -982,9 +1124,11 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   if a later phase (e.g. the Phase 12 dashboard) needs these distinguished as structured fields
   rather than one free-text audit trail.
 - Spec §59 (recognizing that two differently-worded opportunities for the same company represent
-  the same underlying problem) is not implemented — out of scope for Phase 6 (ADR-0013 part 7),
-  since nothing in the current pipeline can yet re-run `ANALYZE` for a company that already has an
-  opportunity. Revisit once `REFRESH_EVIDENCE`/re-research (Phase 14) exists.
+  the same underlying problem) is still not implemented — out of scope for Phase 6 (ADR-0013 part
+  7). Now that `REFRESH_EVIDENCE` (Phase 14) really does re-run `ANALYZE` for an already-researched
+  company, a second `ANALYZE` pass can genuinely form a second, differently-worded opportunity row
+  for the same underlying problem with no dedupe check between them — spec §59 remains an open
+  follow-up, now with a real path that can trigger it (previously only a hypothetical one).
 - `companies.lifecycleStatus`'s `RESEARCHED -> NO_OPPORTUNITY` transition (built Phase 1/2) is
   still never exercised by any real code path — Phase 6 always forms an opportunity regardless of
   score and leaves rejection to Phase 7's gate (ADR-0013 part 2). Whether anything should ever
@@ -1005,14 +1149,14 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   test caught a real false positive ("technical SEO diagnostic" flagged as medical diagnosis) —
   expect more patterns to be needed as real opportunities are classified against it.
 - `DEFAULT_OPPORTUNITY_GATE_CONFIG`'s three constants (`scoreThreshold: 75`,
-  `evidenceStrengthFloor: 10`, `allowHighRisk: false`) are reasoned starting points, not
-  empirically tuned (ADR-0014 part 5) — same category as ADR-0008/0009/0012's other placeholder
-  constants. No `system_config` wiring exists yet to let an operator change them without a code
-  change; `runVerifyTask` accepts a `gateConfig` override for whenever that wiring exists.
+  `evidenceStrengthFloor: 10`, `allowHighRisk: false`) are still reasoned starting points, not
+  empirically tuned (ADR-0014 part 5) — but as of Phase 14 an operator *can* change them, live,
+  from `/settings` (`getOpportunityGateConfig`/`setOpportunityGateConfig`,
+  `worker.ts`'s `TASK_HANDLERS.VERIFY` reads the live value every cycle).
 - An operator wanting to let a specific `HIGH_RISK` opportunity through (spec §8's "unless
-  explicitly reviewed by the operator") currently has no dashboard control — only a code-level
-  `gateConfig.allowHighRisk` override, which is global, not per-opportunity. A later phase (the
-  Phase 12 dashboard, most likely) should add a real per-opportunity override path.
+  explicitly reviewed by the operator") can now flip `allowHighRisk` from `/settings` (Phase 14),
+  but it's still global, not per-opportunity — a later phase should add a real per-opportunity
+  override path if a global toggle proves too blunt in practice.
 - `DEFAULT_PRICE_BANDS`' duration cutoffs (Phase 8, `src/lib/pricing.ts`) and
   `MIN_SCOPE_WORD_COUNT` (`src/lib/offerLint.ts`) are reasoned starting points, not empirically
   tuned — same category as every earlier phase's placeholder constants (ADR-0008/0009/0012/0014).
@@ -1083,11 +1227,12 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   run end-to-end as a real `launchctl` job in this phase (ADR-0018 part 10) — only `npm run
   worker` directly has been verified live. The operator should test the actual `launchctl load`
   path with their own filled-in paths before relying on it.
-- No dashboard control exists yet for spec §8's per-opportunity high-risk gate override (spec §32
-  gate config remains a global `gateConfig.allowHighRisk` code-level override, Phase 7) or for
-  `system_config`'s general key set beyond autonomous mode (score threshold, pricing bands,
-  country/industry allowlists, discovery volume, ...) — both still Phase 14 scope (ADR-0019
-  part 10).
+- Phase 14 gave `/settings` a dashboard control for spec §32's gate config (including
+  `allowHighRisk`, still global not per-opportunity) and the re-research window, but
+  `system_config`'s remaining general key set (pricing bands, country/industry allowlists as a
+  `system_config` key specifically, discovery volume, research depth, min confidence, max
+  simultaneous work, daily limits) still has no dashboard control or wiring — ADR-0021 part 5's
+  deliberate scope call, not an oversight.
 - Dashboard filtering (Phase 12) covers only spec §73's basics (status/verifier-result/min-score/
   industry/country/search for opportunities; lifecycle-status/search for companies) via plain GET
   query params — no date-range/campaign/reply-status filters, saved filters, or client-side
@@ -1116,3 +1261,28 @@ Confirmed against Claude Code's hooks reference and empirically in this phase's 
   changes) and §76 (recurring-pattern detection across companies) remain unimplemented by design —
   explicitly deferred per PLAN.md's "Deferred beyond these phases" list. Phase 13 only produces
   the statistics; nothing consumes them autonomously.
+- `restoreDatabase` (Phase 14, spec §80) has no automated safeguard against restoring over a DB
+  file the worker/dashboard currently has open — it's a plain file copy, by design (spec §80's
+  "this can initially be extremely simple," ADR-0021 part 7). The operator is responsible for
+  stopping `npm run worker`/`next dev`/`next start` first; no code enforces this.
+- `DEFAULT_REFRESH_EVIDENCE_BATCH_SIZE = 3` (`src/worker.ts`, Phase 14) is a reasoned starting
+  point, not empirically tuned — same category as every earlier phase's placeholder constants
+  (ADR-0008/0009/0012/0014/0015/0020). No live multi-hour worker run has yet exercised a scenario
+  with more than a handful of companies simultaneously past their re-research window, so whether 3
+  per cycle is too conservative or too aggressive in practice is still an open question.
+  `ensureRefreshEvidenceWork`'s `batchSize` parameter exists for whenever that turns out to matter.
+  Wiring this to `system_config` (rather than a code constant) is a natural follow-up alongside the
+  gate config/re-research window, not done this phase (ADR-0021 part 5's same "two keys is enough
+  for now" scope call).
+- As noted above, wiring `REFRESH_EVIDENCE` for real means a second `ANALYZE` pass can now form a
+  second, differently-worded `opportunities` row for a problem an earlier pass already surfaced —
+  spec §59's duplicate-opportunity-prevention gap (still unimplemented, ADR-0013 part 7) is no
+  longer purely hypothetical.
+- No real live run has exercised `REFRESH_EVIDENCE`/exclusion/DO_NOT_CONTACT against real
+  `claude` CLI output or real autonomous-mode traffic this phase — same `VERIFIER_REJECTED`-adjacent
+  blocker every phase since 8 has hit (no real opportunity/company has reached a state where these
+  paths fire in practice yet). Verified instead via unit/fixture tests (90+ new/extended test
+  cases), real CLI smoke runs of every new script against a real (migrated, non-fixture) SQLite
+  file, and 9 passing Playwright scenarios against a real browser + real `next dev` server — see
+  [phase-14-operational-hardening.md](phases/phase-14-operational-hardening.md)'s "Testing
+  performed" for the exact commands run.

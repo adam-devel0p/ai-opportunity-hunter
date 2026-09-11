@@ -1368,3 +1368,133 @@ already documented), so `/analytics` has only ever been exercised against seeded
 this phase; a real read of it is still pending the first real `SENT` outreach draft.
 
 ---
+
+## ADR-0021: Phase 14 (Operational hardening) judgment calls
+
+**Status:** Accepted (Phase 14).
+
+**Decision, part 1 — company/domain/industry/country exclusion is split across two mechanisms,
+not one unified table:** permanent single-company exclusion reuses `companies.lifecycleStatus =
+"EXCLUDED"` (already in the Phase 1 schema, already a special-cased any-status transition in
+`stateMachine.ts`) plus the existing `exclusionReason` column — a company already has its own row,
+so there's nothing a separate table would add. Domain/industry/country exclusion is a new
+`exclusion_rules` table (`type: DOMAIN | INDUSTRY | COUNTRY`, `value`, `reason`), because those
+rules must be checkable against a company that doesn't exist yet (a domain never discovered, an
+industry no company has been found in yet) — there's no row to set a status on. Matching is exact
+(case-insensitive), not substring, per `src/pipeline/exclusionCheck.ts`'s docstring — a rule for
+"UK" must not also silently catch "UK & Ireland".
+
+**Decision, part 2 — exclusion is enforced at two independent points, not one:**
+`discoverHandler.ts` checks each newly-discovered candidate against live rules before inserting it
+(cheap, avoids ever creating a company row for a domain/industry/country already excluded) and
+also re-checks an already-known company on rediscovery. But the *authoritative* enforcement point
+is `prescreenHandler.ts`'s own check, run fresh immediately before every PRESCREEN Claude call —
+this is what actually guarantees "a rule added after this company was already discovered and
+queued still takes effect," since discoverHandler.ts's check can only ever see the rules that
+existed at discovery time. Both checks call the same pure `checkExclusionRules`/`checkExclusion`
+so the matching logic itself can't drift between the two sites.
+
+**Decision, part 3 — DO_NOT_CONTACT is enforced by *not creating* the `WRITE_OUTREACH` work item,
+with a defensive re-check in the outreach handler itself:** `contactHandler.ts` is the one place
+that creates `WRITE_OUTREACH` items, so that's where the check that matters lives — it still forms
+the `contacts` row (useful information even if DNC) but skips enqueueing, and propagates
+`doNotContact` onto a freshly-found contact row when a *prior* contact for the same company/email
+was already marked DNC (contacts are append-only; a later research pass creates a new row rather
+than updating the old one). `outreachHandler.ts` re-checks the same predicate
+(`src/lib/doNotContact.ts`) before ever calling Claude, closing the race where an item was already
+queued before the operator set DNC — same "two enforcement points, one shared pure predicate"
+shape as exclusion (part 2).
+
+**Decision, part 4 — `REFRESH_EVIDENCE`'s handler does not transition `companies.lifecycleStatus`
+at all:** every other handler collapses a validated lifecycle hop in one write, but there is no
+`RESEARCHED -> RESEARCHED` self-loop in `stateMachine.ts`'s transition table, and a refresh
+genuinely doesn't change which stage a company is at — only what's known about it. It reuses
+`researchHandler.ts`'s exact evidence-persistence rule via a new shared module
+(`src/pipeline/researchEvidence.ts`, factored out of `researchHandler.ts` with no behavior
+change — its own test suite still passes untouched), updates
+`lastResearchedAt`/`nextEligibleResearchAt`, and enqueues a fresh `ANALYZE` item. Eligible
+companies (`RESEARCHED` or `NO_OPPORTUNITY`, past their freshness window) are topped up by a new
+`worker.ts` function, `ensureRefreshEvidenceWork`, mirroring `ensureDiscoveryWork`'s "the worker
+itself tops this up every cycle" pattern (ADR-0018) — except capped at a small per-cycle batch
+(`DEFAULT_REFRESH_EVIDENCE_BATCH_SIZE = 3`), since several companies can become eligible at once
+(unlike DISCOVER's "at most one ever in flight") and spec §49's priority ordering already ranks
+this below every in-flight opportunity's own progression.
+
+**Decision, part 5 — `system_config` gains exactly two new keys this phase (the gate config and
+the re-research window), not the full DATABASE_SCHEMA.md wishlist:** `opportunityGate.ts` and
+`researchFreshness.ts` were already fully parameterized since Phases 7/5 respectively (config as
+an optional function parameter, defaulting to a code constant) — wiring a live `system_config`
+value into `verifyHandler.ts`/`researchHandler.ts`/`refreshEvidenceHandler.ts` via `worker.ts`'s
+`TASK_HANDLERS` map cost nothing beyond the two new `config.ts` accessors and is directly useful
+(the operator can now actually change the score threshold without a code edit). Country/industry
+allowlists, pricing bands, discovery volume, research depth, min confidence, and daily limits
+remain unwired — rewiring those mid-phase would touch already-tested Phase 1/6/8 internals for no
+acceptance-criteria benefit, and country/industry exclusion specifically is already covered by
+`exclusion_rules` (part 1), which is a better fit than an allowlist for this app's "block specific
+things" operator workflow anyway.
+
+**Decision, part 6 — seed/test mode (spec §99) is a CLI-only feature
+(`scripts/seed.ts`/`src/lib/seedCompanies.ts`), not a dashboard page:** unlike manual research
+(spec §72, Phase 12's `/companies/new`), seed mode's whole point is exercising the *entire*
+pipeline including PRESCREEN for prompt-tuning purposes — a company is inserted at
+`PRESCREEN_PENDING` (mirroring `discoverHandler.ts`'s own per-candidate insert exactly, just
+sourced from a CLI-supplied URL list instead of the Discovery Agent's output, with
+`sourceCampaignId` left null) rather than `RESEARCH_PENDING`. `scripts/seed.ts run` drives a
+company through PRESCREEN -> RESEARCH -> ANALYZE -> VERIFY -> BUILD_OFFER in-process by calling
+each stage's real handler directly and printing a trail, stopping early on DISCARD/exclusion/gate
+failure/task failure — deliberately not reusing `runWorkerCycle` (which requires autonomous mode
+on and would pick up whatever else is queued, not just the seeded companies). This is a CLI tool
+because its audience is the operator tuning prompts before trusting continuous operation, not a
+day-to-day dashboard workflow — same reasoning as `scripts/campaigns.ts` staying CLI-only.
+
+**Decision, part 7 — backup is `better-sqlite3`'s own `.backup()` API, not a plain file copy;
+restore is a plain file copy, not a "safety-checked" one:** the live DB runs in WAL mode
+(`db/client.ts`), where the on-disk main file alone can be missing recently-committed data still
+sitting in the `-wal` file — `.backup()` produces one consistent snapshot regardless of journal
+mode or concurrent writers (the ADR-0004 hook subprocess included). Restore is deliberately dumb —
+copy the backup over the target, delete any stale `-wal`/`-shm` sidecar — with no attempt to
+detect whether the worker/dashboard currently has the target open; the operator is responsible for
+stopping those first, the same trust boundary as any other destructive local-file operation this
+app doesn't try to guard against (per spec §80's "this can initially be extremely simple").
+
+**Decision, part 8 — export covers exactly the five entities spec §79 names
+(companies/opportunities/contacts/outreach drafts/outreach outcomes), as one bundle, with CSV
+serializing nested JSON columns inline rather than splitting them into extra columns:** JSON
+export is the full bundle as-is; CSV is one file per entity (a dashboard `/settings` page links to
+both, plus `scripts/export.ts` for the CLI). A JSON array/object column (e.g.
+`opportunities.risks`) becomes one quoted JSON string in its CSV cell rather than N extra columns
+— spec §79 only asks that research not be "locked entirely inside the UI," and a flat one-row-per-
+record CSV is simpler to produce and consume than a normalized multi-table export for this app's
+scale.
+
+**Decision, part 9 — a `/settings` dashboard page covers exclusion rules, the gate config, and the
+re-research window (spec §70 "a config UI beyond autonomous on/off"), plus backup/export
+entry points, rather than a wider settings surface:** these are exactly the `system_config` keys
+Phase 14 actually wired up (part 5) and the exclusion mechanism it added (part 1) — the page
+doesn't attempt to preemptively expose every key DATABASE_SCHEMA.md's original wishlist names,
+since most of those aren't wired to anything yet (part 5). Company-level exclude/DO_NOT_CONTACT
+actions live on the company detail page instead (spec §61/§65 act on one company, not global
+config), reusing the same plain-form-action pattern Phase 12 established.
+
+**Decision, part 10 — observability (spec §68) gets one targeted addition (a proper
+`REFRESH_EVIDENCE` activity-feed entry, replacing the placeholder `worker.ts` stub's failure-only
+formatting in `src/lib/activity.ts`) rather than a broader logging rework:** Phase 11's worker
+already logs task-started/completed/failed/quota-exhausted per cycle
+(`formatCycleLog`/`onCycle`), and Phase 12's activity feed already covers every other task type
+per spec §69's example log — the only real gap Phase 14 introduced was a new task type
+(`REFRESH_EVIDENCE`) that needed the same treatment PRESCREEN/RESEARCH/ANALYZE already have. A
+secret-handling pass (spec §77) found nothing to fix: every new module's logging is limited to
+work-item ids, statuses, company/rule values, and cost — never environment variables or
+credentials, consistent with ADR-0001's existing `ANTHROPIC_API_KEY`-stripping machinery, which
+this phase didn't touch.
+
+**Consequences:** The remaining `system_config` keys from DATABASE_SCHEMA.md's original list
+(country/industry allowlists as a distinct mechanism from `exclusion_rules`, pricing bands,
+discovery volume, research depth, min confidence, max simultaneous work, daily limits) stay
+unimplemented; a future phase wiring any of them should extend `config.ts`'s existing
+`isValidGateConfig`-style validated-fallback pattern rather than introducing a new one. Restore
+has no automated test for "the worker was still running during restore" since spec §80 explicitly
+scopes this as "extremely simple" — if concurrent-writer safety during restore ever becomes a real
+operational problem, that's a deliberate follow-up, not an oversight.
+
+---

@@ -29,7 +29,12 @@
     "contact": "tsx scripts/contact.ts",
     "outreach": "tsx scripts/outreach.ts",
     "worker": "tsx src/worker.ts",
-    "autonomous": "tsx scripts/autonomous.ts"
+    "autonomous": "tsx scripts/autonomous.ts",
+    "refresh-evidence": "tsx scripts/refreshEvidence.ts",
+    "exclusions": "tsx scripts/exclusions.ts",
+    "backup": "tsx scripts/backup.ts",
+    "export": "tsx scripts/export.ts",
+    "seed": "tsx scripts/seed.ts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

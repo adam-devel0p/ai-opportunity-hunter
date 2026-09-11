@@ -411,6 +411,22 @@ export const outreachOutcomes = sqliteTable("outreach_outcomes", {
   updatedAt: updatedAt(),
 });
 
+// --- exclusion_rules -----------------------------------------------------
+// Spec §61: persistent domain/industry/country blocks, checked by discoverHandler.ts (new
+// candidates) and prescreenHandler.ts (already-known companies, so a rule added after discovery
+// still takes effect before the next Claude call). Permanent single-company exclusion doesn't
+// need a row here — it's `companies.lifecycleStatus = "EXCLUDED"` directly (see
+// stateMachine.ts's EXCLUDED special case), since the company already exists as its own row.
+
+export const exclusionRules = sqliteTable("exclusion_rules", {
+  id: id(),
+  type: text("type", { enum: ["DOMAIN", "INDUSTRY", "COUNTRY"] }).notNull(),
+  value: text("value").notNull(),
+  reason: text("reason"),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
 // --- system_config -----------------------------------------------------
 
 export const systemConfig = sqliteTable("system_config", {

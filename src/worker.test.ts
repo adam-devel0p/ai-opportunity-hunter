@@ -12,6 +12,7 @@ import { invokeClaude } from "./agents/claudeClient.js";
 import {
   recoverStuckWorkItems,
   ensureDiscoveryWork,
+  ensureRefreshEvidenceWork,
   runWorkerCycle,
   runWorker,
   DEFAULT_STUCK_RUNNING_TIMEOUT_MS,
@@ -170,6 +171,70 @@ describe("ensureDiscoveryWork", () => {
     const second = ensureDiscoveryWork(db);
     expect(second).not.toBeNull();
     expect(second).not.toBe(first);
+  });
+});
+
+describe("ensureRefreshEvidenceWork", () => {
+  it("does nothing when no company is eligible", () => {
+    seedCompany({ lifecycleStatus: "RESEARCHED", nextEligibleResearchAt: new Date(Date.now() + 100_000) });
+    const created = ensureRefreshEvidenceWork(db);
+    expect(created).toEqual([]);
+  });
+
+  it("enqueues REFRESH_EVIDENCE for a RESEARCHED company past its eligibility window", () => {
+    const company = seedCompany({
+      lifecycleStatus: "RESEARCHED",
+      nextEligibleResearchAt: new Date(Date.now() - 1000),
+    });
+    const created = ensureRefreshEvidenceWork(db);
+    expect(created).toHaveLength(1);
+
+    const items = db.select().from(workItems).all();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.taskType).toBe("REFRESH_EVIDENCE");
+    expect(items[0]?.entityId).toBe(company.id);
+    expect(items[0]?.priority).toBe(TASK_TYPE_PRIORITY.REFRESH_EVIDENCE);
+  });
+
+  it("also considers a NO_OPPORTUNITY company eligible", () => {
+    seedCompany({
+      lifecycleStatus: "NO_OPPORTUNITY",
+      nextEligibleResearchAt: new Date(Date.now() - 1000),
+    });
+    expect(ensureRefreshEvidenceWork(db)).toHaveLength(1);
+  });
+
+  it("ignores a company with no nextEligibleResearchAt set", () => {
+    seedCompany({ lifecycleStatus: "RESEARCHED", nextEligibleResearchAt: null });
+    expect(ensureRefreshEvidenceWork(db)).toEqual([]);
+  });
+
+  it("does not double-enqueue while a REFRESH_EVIDENCE item is already in flight for a company", () => {
+    const company = seedCompany({
+      lifecycleStatus: "RESEARCHED",
+      nextEligibleResearchAt: new Date(Date.now() - 1000),
+    });
+    const first = ensureRefreshEvidenceWork(db);
+    expect(first).toHaveLength(1);
+
+    const second = ensureRefreshEvidenceWork(db);
+    expect(second).toEqual([]);
+    expect(
+      db.select().from(workItems).where(eq(workItems.entityId, company.id)).all(),
+    ).toHaveLength(1);
+  });
+
+  it("caps how many it enqueues per call at the batch size", () => {
+    for (let i = 0; i < 5; i++) {
+      seedCompany({
+        normalizedDomain: `eligible-${i}.example`,
+        website: `https://eligible-${i}.example`,
+        lifecycleStatus: "RESEARCHED",
+        nextEligibleResearchAt: new Date(Date.now() - 1000),
+      });
+    }
+    const created = ensureRefreshEvidenceWork(db, new Date(), 2);
+    expect(created).toHaveLength(2);
   });
 });
 
